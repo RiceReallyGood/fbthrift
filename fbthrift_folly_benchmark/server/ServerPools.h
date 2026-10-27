@@ -14,11 +14,11 @@ namespace press_server {
 // its default one (setNumIOWorkerThreads / setNumCPUWorkerThreads).
 struct ServerPools {
   std::shared_ptr<folly::IOThreadPoolExecutor> io;
-  // folly_cpu / manual: passed to setThreadManagerFromExecutor.
+  // folly_cpu: passed to setThreadManagerFromExecutor (fbthrift wraps it in
+  // VirtualExecutor + MeteredExecutors; kept as the original reference).
   std::shared_ptr<folly::CPUThreadPoolExecutor> cpu;
-  // cpu / cpu_pinned / cluster: a folly::ClusterAwareExecutor behind a
-  // ThreadManagerExecutorAdapter, passed to setThreadManager (no
-  // VirtualExecutor keep-alive counting per request).
+  // cpu / cpu_pinned / cluster / manual: the executor behind a
+  // DirectThreadManager, passed to setThreadManager.
   std::shared_ptr<folly::Executor> executor;
   std::shared_ptr<apache::thrift::concurrency::ThreadManager> threadManager;
   std::function<std::string()> queueStats; // cluster-aware executor modes
@@ -31,8 +31,8 @@ struct ServerPools {
 //   cpu_pinned - lean executor, one global queue, IO/CPU threads pinned
 //                round-robin to clusters
 //   cluster    - lean executor, per-cluster queues, threads pinned as above
-//   manual     - CPUThreadPoolExecutor; IO threads pinned to ioCpus, CPU
-//                threads to cpuCpus (stage 1)
+//   manual     - CPUThreadPoolExecutor (direct); IO threads pinned to
+//                ioCpus, CPU threads to cpuCpus (stage 1)
 // Throws std::invalid_argument on an unknown mode or a bad cpulist.
 ServerPools makeServerPools(
     const std::string& mode,

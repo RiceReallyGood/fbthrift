@@ -27,15 +27,27 @@ def load(paths):
 
 
 def medians(rows):
-    """{(group..., load_pct, label): {metric: median}}"""
+    """{(group..., load_pct, label): {metric: median, "ok": bool}}
+
+    ok is False when any repetition had failures or achieved < 98% of its
+    target QPS (its percentiles then describe an overloaded run).
+    """
     acc = defaultdict(lambda: defaultdict(list))
+    ok = defaultdict(lambda: True)
     for r in rows:
         key = tuple(r[g] for g in GROUP) + (r["load_pct"], label(r))
         for m in METRICS:
             if r.get(m):
                 acc[key][m].append(float(r[m]))
-    return {k: {m: statistics.median(v) for m, v in ms.items()}
-            for k, ms in acc.items()}
+        target = float(r.get("target_qps") or 0)
+        if int(r.get("fail") or 0) > 0 or (
+                target and float(r.get("qps") or 0) < 0.98 * target):
+            ok[key] = False
+    out = {k: {m: statistics.median(v) for m, v in ms.items()}
+           for k, ms in acc.items()}
+    for k in out:
+        out[k]["ok"] = ok[k]
+    return out
 
 
 def delta(value, base):
@@ -49,9 +61,9 @@ def render(med, baseline):
     for g in groups:
         out.append("### " + " ".join(f"{n}={v}" for n, v in zip(GROUP, g)))
         out.append("")
-        out.append("| load% | config | QPS | P50 us | P99 us | P999 us | "
-                   "ΔP99 vs " + baseline + " |")
-        out.append("|---|---|---|---|---|---|---|")
+        out.append("| load | config | QPS | P50 us | P99 us | P999 us | "
+                   "ΔP99 vs " + baseline + " | ok |")
+        out.append("|---|---|---|---|---|---|---|---|")
         keys = sorted((k for k in med if k[:len(GROUP)] == g),
                       key=lambda k: (float(k[-2]), k[-1]))
         for k in keys:
@@ -60,7 +72,7 @@ def render(med, baseline):
             d = f"{delta(m['p99'], base):+.1f}%" if base else "-"
             out.append(f"| {k[-2]} | {k[-1]} | {m['qps']:.0f} | "
                        f"{m['p50']:.0f} | {m['p99']:.0f} | {m['p999']:.0f} | "
-                       f"{d} |")
+                       f"{d} | {'' if m['ok'] else 'OVERLOAD'} |")
         out.append("")
     return "\n".join(out)
 

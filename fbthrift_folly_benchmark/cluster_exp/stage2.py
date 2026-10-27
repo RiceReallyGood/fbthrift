@@ -6,7 +6,7 @@ socket (CPUs 0-191); the client runs on the other socket (CPUs 192-383).
 
 Configs (I/C = IO/CPU threads):
   B0  ThriftServer defaults (ThreadManager), unpinned          - baseline
-  B1  folly CPUThreadPoolExecutor, unpinned
+  B1  lean executor, one global queue, unpinned
   B2  IO/CPU threads pinned round-robin to clusters, global queue
   K1  B0 with kernel.sched_cluster=1
   CA  B2 + ClusterAwareBlockingQueue
@@ -19,7 +19,8 @@ knee measured for that part, the same absolute QPS for every config. With
 --abs-loads the listed absolute QPS values are used instead (load_pct then
 holds the QPS), which shows where each config saturates.
 
-B1/B2/CA use folly::ClusterAwareExecutor (B1/B2 with one global queue).
+B1/B2/CA use folly::ClusterAwareExecutor (B1/B2 with one global queue) behind
+DirectThreadManager.
 """
 
 import argparse

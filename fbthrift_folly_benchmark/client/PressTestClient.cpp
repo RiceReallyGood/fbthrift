@@ -408,7 +408,9 @@ static void maybe_log_slow_rpc(const BenchmarkState& state, int idx, int64_t sen
 // Sends one open-loop request on connection `idx`; must run on that
 // connection's EventBase. Returns false when the in-flight cap, the request
 // budget or the stop flag prevents sending.
-static bool open_loop_send(const std::shared_ptr<BenchmarkState>& state, int idx, folly::Executor* cpu_executor) {
+// intended_send_us > 0 (paced mode) is when the pacer meant to send; latency is
+// measured from it so delays inside the client count (no coordinated omission).
+static bool open_loop_send(const std::shared_ptr<BenchmarkState>& state, int idx, folly::Executor* cpu_executor, int64_t intended_send_us = 0) {
     if (g_open_loop_inflight.load(std::memory_order_relaxed) >= FLAGS_open_loop_inflight) return false;
     int current = g_open_loop_inflight.fetch_add(1, std::memory_order_relaxed);
     if (current >= FLAGS_open_loop_inflight) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); return false; }
@@ -421,7 +423,7 @@ static bool open_loop_send(const std::shared_ptr<BenchmarkState>& state, int idx
     if (g_stop.load(std::memory_order_acquire)) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); if (FLAGS_test_iterations > 0) g_request_budget.fetch_add(1, std::memory_order_relaxed); return false; }
 
     state->total_inflight.fetch_add(1, std::memory_order_relaxed);
-    int64_t send_time = monotonic_us();
+    int64_t send_time = intended_send_us > 0 ? intended_send_us : monotonic_us();
     auto& ctx = *state->ctxs[idx];
     send_rpc(*ctx.client, state->request)
         .via(cpu_executor)
@@ -483,7 +485,8 @@ static void pacer_loop(std::shared_ptr<BenchmarkState> state, std::vector<int> c
             while (backlog > prev && !g_max_burst.compare_exchange_weak(prev, backlog, std::memory_order_relaxed)) {}
             for (; posted < due; ++posted) {
                 int idx = conns[next++ % conns.size()];
-                state->ctxs[idx]->evb->runInEventBaseThread([state, idx, cpu_executor]() { open_loop_send(state, idx, cpu_executor); });
+                int64_t intended = schedule.dueTime(posted);
+                state->ctxs[idx]->evb->runInEventBaseThread([state, idx, cpu_executor, intended]() { open_loop_send(state, idx, cpu_executor, intended); });
             }
             continue;
         }

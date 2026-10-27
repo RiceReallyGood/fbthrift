@@ -1,5 +1,7 @@
 #include "server/ServerPools.h"
 
+#include "server/DirectThreadManager.h"
+
 #include <stdexcept>
 #include <utility>
 
@@ -67,9 +69,7 @@ ServerPools makeServerPools(
           s.stolenTakes,
           total ? double(s.stolenTakes) / double(total) : 0.0);
     };
-    pools.threadManager =
-        std::make_shared<apache::thrift::concurrency::ThreadManagerExecutorAdapter>(
-            executor);
+    pools.threadManager = std::make_shared<DirectThreadManager>(executor);
     pools.executor = std::move(executor);
     return pools;
   }
@@ -87,8 +87,10 @@ ServerPools makeServerPools(
 
   pools.io = std::make_shared<folly::IOThreadPoolExecutor>(
       ioThreads.first, ioThreads.second, std::move(ioFactory));
-  pools.cpu = std::make_shared<folly::CPUThreadPoolExecutor>(
+  auto cpuPool = std::make_shared<folly::CPUThreadPoolExecutor>(
       cpuThreads, std::move(cpuFactory));
+  pools.threadManager = std::make_shared<DirectThreadManager>(cpuPool);
+  pools.executor = std::move(cpuPool);
   return pools;
 }
 
