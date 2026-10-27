@@ -1,0 +1,7 @@
+./press_client  --mode=close_loop   --host=127.0.0.1   --port=8002   --transport=rocket   --payload_size=2048      --queue_depth=1   --test_seconds=10   --compression=zstd   --rpc_timeout_ms=100000  --io_threads=1  --cpu_threads=1 --connections=1 --echo_attachment=true
+
+
+
+./press_client --mode=open_loop  --host=127.0.0.1   --port=8002   --transport=rocket   --payload_size=2048     --open_loop_inflight=10  --test_seconds=10   --compression=zstd   --rpc_timeout_ms=100000  --io_threads=1  --cpu_threads=1 --connections=1 --echo_attachment=true
+
+

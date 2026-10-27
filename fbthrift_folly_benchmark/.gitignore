@@ -1,0 +1,5 @@
+third/
+build/fbthrift_change/
+question/
+gen-cpp2/
+*.png
