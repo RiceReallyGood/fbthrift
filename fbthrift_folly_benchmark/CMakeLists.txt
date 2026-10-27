@@ -33,6 +33,7 @@ target_include_directories(thrift_generated PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(press_server
     server/PerfTestService.cpp
     server/PressServer.cpp
+    server/ServerPools.cpp
     util/ResourceMonitor.cpp
 )
 target_link_libraries(press_server PRIVATE thrift_generated ${COMMON_LIBS} atomic)
