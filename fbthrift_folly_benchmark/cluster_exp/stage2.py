@@ -65,6 +65,8 @@ def main():
     ap.add_argument("--scenario", choices=SCENARIOS, required=True)
     ap.add_argument("--parts", default="main,payload,ratio,imbalance")
     ap.add_argument("--only-main", action="store_true")
+    ap.add_argument("--configs", default=None,
+                    help="comma-separated subset of configs to run")
     ap.add_argument("--seconds", type=int, default=30)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--reps", type=int, default=3)
@@ -101,6 +103,8 @@ def main():
                        IMBALANCE_LOADS))
 
     for part, configs, payload, (io, cpu), conns, loads in groups:
+        if args.configs:
+            configs = [c for c in configs if c in args.configs.split(",")]
         conns = conns or 4 * io
         tag = f"{part}_p{payload}_io{io}_cpu{cpu}_c{conns}"
 

@@ -35,6 +35,9 @@ done
 
 listening() { ss -ltn "sport = :$PORT" | grep -q LISTEN; }
 
+# Many IO threads (e.g. 192 EventBases) need more fds than the default 1024.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
 mkdir -p "$out"
 if listening; then
   echo "port $PORT already in use" >&2
