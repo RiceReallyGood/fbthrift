@@ -45,6 +45,7 @@ DEFINE_int32(payload_size, -1, "Payload size (<0 = scan 1~1024)");
 DEFINE_bool(echo_attachment, false, "Echo payload back");
 DEFINE_int32(rpc_timeout_ms, 2000, "RPC timeout in ms");
 DEFINE_int32(test_seconds, 20, "Test duration");
+DEFINE_string(method, "test", "RPC method: test | testEb (thread='eb' on the server)");
 DEFINE_int32(warmup_seconds, 0, "Requests sent in the first N seconds are not recorded in latency stats");
 DEFINE_int32(test_iterations, 0, "Test iterations (0 = time-based)");
 DEFINE_string(compression, "none", "Compression algorithm: none, zlib, zstd");
@@ -104,6 +105,12 @@ int64_t monotonic_us() {
 
 static bool after_warmup(int64_t start_time, int64_t send_time) {
   return send_time - start_time >= FLAGS_warmup_seconds * 1000000LL;
+}
+
+static folly::SemiFuture<press_test::PerfTestResponse> send_rpc(
+    PerfTestClient& client, const press_test::Request& req) {
+  return FLAGS_method == "testEb" ? client.semifuture_testEb(req)
+                                  : client.semifuture_test(req);
 }
 
 std::string generate_payload(int size) {
@@ -327,7 +334,7 @@ std::shared_ptr<BenchmarkState> run_benchmark_close_loop(
         ctx.evb->runInEventBaseThread([state, idx, send_request, cpu_executor]() {
         auto& ctx = *state->ctxs[idx];
         int64_t send_time = monotonic_us();
-        ctx.client->semifuture_test(state->request)
+        send_rpc(*ctx.client, state->request)
             .via(cpu_executor)
             .thenTry([state, idx, send_time, send_request](folly::Try<press_test::PerfTestResponse>&& t) {
                 int64_t recv_time = monotonic_us();
@@ -416,7 +423,7 @@ static bool open_loop_send(const std::shared_ptr<BenchmarkState>& state, int idx
     state->total_inflight.fetch_add(1, std::memory_order_relaxed);
     int64_t send_time = monotonic_us();
     auto& ctx = *state->ctxs[idx];
-    ctx.client->semifuture_test(state->request)
+    send_rpc(*ctx.client, state->request)
         .via(cpu_executor)
         .thenTry([state, idx, send_time](folly::Try<press_test::PerfTestResponse>&& t) {
             int64_t recv_time = monotonic_us();

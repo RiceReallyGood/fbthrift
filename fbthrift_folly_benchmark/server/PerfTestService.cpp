@@ -15,9 +15,24 @@ std::atomic<uint64_t> PerfTestServiceHandler::g_last_resource_update_time{0};
 void PerfTestServiceHandler::test(PerfTestResponse &response,
                                   std::unique_ptr<Request> req)
 {
+    fillResponse(response, *req);
+}
 
-    if (*req->echo_attachment()) {
-        *response.payload() = *req->payload();
+void PerfTestServiceHandler::async_eb_testEb(
+    std::unique_ptr<apache::thrift::HandlerCallback<
+        std::unique_ptr<PerfTestResponse>>> callback,
+    std::unique_ptr<Request> req)
+{
+    auto response = std::make_unique<PerfTestResponse>();
+    fillResponse(*response, *req);
+    callback->result(std::move(response));
+}
+
+void PerfTestServiceHandler::fillResponse(PerfTestResponse &response,
+                                          const Request &req)
+{
+    if (*req.echo_attachment()) {
+        *response.payload() = *req.payload();
     }
 
     uint64_t last = g_last_resource_update_time.load(std::memory_order_relaxed);

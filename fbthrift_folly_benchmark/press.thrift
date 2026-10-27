@@ -21,4 +21,7 @@ struct PerfTestResponse {
 
 service PerfTestService {
     PerfTestResponse test(1: Request req);
+    // Same work as test(), run on the IO thread (no IO->CPU handoff); the
+    // no-handoff reference point for the experiments.
+    PerfTestResponse testEb(1: Request req) (thread = 'eb');
 }
