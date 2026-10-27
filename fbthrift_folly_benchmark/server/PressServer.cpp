@@ -21,7 +21,7 @@ DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_int32(num_io_threads, 1, "Number of IO worker threads");
 DEFINE_int32(num_cpu_threads, 1, "Number of CPU worker threads");
 DEFINE_bool(use_io_uring, false, "Use IoUringBackend for IO threads");
-DEFINE_string(pool_mode, "tm", "Thread pools: tm | cpu | cpu_pinned | manual | cluster");
+DEFINE_string(pool_mode, "tm", "Thread pools: tm | folly_cpu | cpu | cpu_pinned | cluster | manual");
 DEFINE_string(io_cpus, "", "manual mode: cpulist for IO threads");
 DEFINE_string(cpu_cpus, "", "manual mode: cpulist for CPU threads");
 
@@ -78,7 +78,9 @@ ServerHolder newServer(int32_t port, int32_t num_io_threads, int32_t num_cpu_thr
     server->setNumIOWorkerThreads(num_io_threads);
   }
   server->setPort(port);
-  if (holder.pools.cpu) {
+  if (holder.pools.threadManager) {
+    server->setThreadManager(holder.pools.threadManager);
+  } else if (holder.pools.cpu) {
     server->setThreadManagerFromExecutor(holder.pools.cpu.get(), "press");
   } else {
     server->setNumCPUWorkerThreads(num_cpu_threads);
