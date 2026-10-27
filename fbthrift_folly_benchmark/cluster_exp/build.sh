@@ -3,7 +3,7 @@
 # cluster-aware folly tests on suzhou950.
 #
 # Usage: build.sh folly|fizz|wangle|fbthrift|bench|all
-#        build.sh ca_test [gtest args...]
+#        build.sh ca_test|evb_test [gtest args...]
 set -euo pipefail
 
 CA=${CA:-$HOME/cluster_aware}
@@ -34,6 +34,12 @@ bench() {
   cmake --build "$BLD/bench" -j "$JOBS"
 }
 
+evb_test() {
+  cmake -S "$SRC/folly/folly/io/async/test/evb_wakeup" -B "$BLD/evb_test" "${COMMON[@]}"
+  cmake --build "$BLD/evb_test" -j "$JOBS"
+  (cd "$BLD/evb_test" && ./evb_wakeup_test "$@")
+}
+
 ca_test() {
   cmake -S "$SRC/folly/folly/executors/test/cluster_aware" -B "$BLD/ca_test" "${COMMON[@]}"
   cmake --build "$BLD/ca_test" -j "$JOBS"
@@ -49,12 +55,13 @@ case $target in
   fbthrift) lib fbthrift "$SRC/fbthrift" -Denable_tests=OFF ;;
   bench) bench ;;
   ca_test) ca_test "$@" ;;
+  evb_test) evb_test "$@" ;;
   all)
     for t in folly fizz wangle fbthrift; do "$0" "$t"; done
     bench
     ;;
   *)
-    echo "usage: $0 folly|fizz|wangle|fbthrift|bench|all|ca_test [gtest args]" >&2
+    echo "usage: $0 folly|fizz|wangle|fbthrift|bench|all|ca_test|evb_test [gtest args]" >&2
     exit 2
     ;;
 esac

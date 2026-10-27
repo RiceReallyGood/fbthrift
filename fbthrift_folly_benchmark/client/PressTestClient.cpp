@@ -1,4 +1,7 @@
 // PressTestClient.cpp — clean version (no stats functions)
+#include <sys/prctl.h>
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +32,7 @@
 #include <thrift/lib/cpp2/async/RocketClientChannel.h>
 #include "gen-cpp2/PerfTestService.h"
 #include "util/LatencyStats.h"
+#include "util/PacedSchedule.h"
 #include "util/ResourceMonitor.h"
 #include <thrift/lib/cpp2/gen/client_cpp.h>
 
@@ -41,6 +45,7 @@ DEFINE_int32(payload_size, -1, "Payload size (<0 = scan 1~1024)");
 DEFINE_bool(echo_attachment, false, "Echo payload back");
 DEFINE_int32(rpc_timeout_ms, 2000, "RPC timeout in ms");
 DEFINE_int32(test_seconds, 20, "Test duration");
+DEFINE_int32(warmup_seconds, 0, "Requests sent in the first N seconds are not recorded in latency stats");
 DEFINE_int32(test_iterations, 0, "Test iterations (0 = time-based)");
 DEFINE_string(compression, "none", "Compression algorithm: none, zlib, zstd");
 DEFINE_int32(connections, 100, "Total number of connections");
@@ -62,9 +67,13 @@ DEFINE_bool(use_io_uring, false, "Use IoUringBackend + AsyncIoUringSocket for cl
 using PerfTestClient = apache::thrift::Client<press_test::PerfTestService>;
 static std::atomic<uint64_t> g_client_last_update_time{0};
 
+// Latency histogram: 1us buckets up to 100ms (larger values land in the overflow bucket).
+constexpr int64_t kLatencyBucketUs = 1;
+constexpr int64_t kLatencyMaxUs = 100000;
+
 // Per-CPU-core stats (no lock needed, each callback thread writes to its own)
 struct alignas(64) ThreadStats {
-    util::HistogramStats<int64_t> latency{100, 0, 5000000};
+    util::HistogramStats<int64_t> latency{kLatencyBucketUs, 0, kLatencyMaxUs};
     util::HistogramStats<double>   server_cpu_usage{1, 0.0, 30000.0};
     util::HistogramStats<double>   client_cpu_usage{1, 0.0, 30000.0};
     util::HistogramStats<double>   server_mem_usage{1, 0.0, 100.0};
@@ -84,11 +93,17 @@ static std::atomic<int64_t> g_request_budget{0};
 std::mutex g_token_mtx;
 std::condition_variable g_token_cv;
 int64_t g_token{0};
+// Largest send backlog a paced open-loop sender had to catch up at once.
+static std::atomic<int64_t> g_max_burst{0};
 
 int64_t monotonic_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+static bool after_warmup(int64_t start_time, int64_t send_time) {
+  return send_time - start_time >= FLAGS_warmup_seconds * 1000000LL;
 }
 
 std::string generate_payload(int size) {
@@ -307,8 +322,11 @@ std::shared_ptr<BenchmarkState> run_benchmark_close_loop(
         if (g_stop.load(std::memory_order_acquire)) return;
 
         state->total_inflight.fetch_add(1, std::memory_order_relaxed);
-        int64_t send_time = monotonic_us();
 
+        // The client channel is not thread-safe: always send from its EventBase.
+        ctx.evb->runInEventBaseThread([state, idx, send_request, cpu_executor]() {
+        auto& ctx = *state->ctxs[idx];
+        int64_t send_time = monotonic_us();
         ctx.client->semifuture_test(state->request)
             .via(cpu_executor)
             .thenTry([state, idx, send_time, send_request](folly::Try<press_test::PerfTestResponse>&& t) {
@@ -319,7 +337,7 @@ std::shared_ptr<BenchmarkState> run_benchmark_close_loop(
                 ThreadStats& stats = *g_stats_per_cpu[stats_idx];
 
                 if (t.hasValue()) {
-                    stats.latency.addValue(latency_us);
+                    if (after_warmup(state->start_time, send_time)) stats.latency.addValue(latency_us);
                     stats.success.fetch_add(1, std::memory_order_relaxed);
                     if (t.value().cpu_usage().value() > 0)
                         stats.server_cpu_usage.addValue(t.value().cpu_usage().value());
@@ -356,6 +374,7 @@ std::shared_ptr<BenchmarkState> run_benchmark_close_loop(
                     }
                 }
             });
+        });
     };
 
     for (int i = 0; i < num_connections; ++i)
@@ -367,6 +386,105 @@ std::shared_ptr<BenchmarkState> run_benchmark_close_loop(
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     return state;
+}
+
+// Logs the first few very slow RPCs to help locate tail outliers.
+static void maybe_log_slow_rpc(const BenchmarkState& state, int idx, int64_t send_time, int64_t latency_us) {
+    static std::atomic<int> logged{0};
+    if (latency_us > 100000 && logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+        LOG(WARNING) << "slow rpc: latency_us=" << latency_us
+                     << " sent_at_ms=" << (send_time - static_cast<int64_t>(state.start_time)) / 1000
+                     << " conn=" << idx;
+    }
+}
+
+// Sends one open-loop request on connection `idx`; must run on that
+// connection's EventBase. Returns false when the in-flight cap, the request
+// budget or the stop flag prevents sending.
+static bool open_loop_send(const std::shared_ptr<BenchmarkState>& state, int idx, folly::Executor* cpu_executor) {
+    if (g_open_loop_inflight.load(std::memory_order_relaxed) >= FLAGS_open_loop_inflight) return false;
+    int current = g_open_loop_inflight.fetch_add(1, std::memory_order_relaxed);
+    if (current >= FLAGS_open_loop_inflight) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); return false; }
+
+    if (FLAGS_test_iterations > 0) {
+        int64_t budget = g_request_budget.fetch_sub(1, std::memory_order_relaxed) - 1;
+        if (budget < 0) { g_request_budget.fetch_add(1, std::memory_order_relaxed); g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); return false; }
+    }
+
+    if (g_stop.load(std::memory_order_acquire)) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); if (FLAGS_test_iterations > 0) g_request_budget.fetch_add(1, std::memory_order_relaxed); return false; }
+
+    state->total_inflight.fetch_add(1, std::memory_order_relaxed);
+    int64_t send_time = monotonic_us();
+    auto& ctx = *state->ctxs[idx];
+    ctx.client->semifuture_test(state->request)
+        .via(cpu_executor)
+        .thenTry([state, idx, send_time](folly::Try<press_test::PerfTestResponse>&& t) {
+            int64_t recv_time = monotonic_us();
+            int64_t latency_us = recv_time - send_time;
+            int stats_idx = get_stats_idx();
+            ThreadStats& stats = *g_stats_per_cpu[stats_idx];
+
+            if (t.hasValue()) {
+                if (after_warmup(state->start_time, send_time)) {
+                    stats.latency.addValue(latency_us);
+                    maybe_log_slow_rpc(*state, idx, send_time, latency_us);
+                }
+                stats.success.fetch_add(1, std::memory_order_relaxed);
+                if (t.value().cpu_usage().value() > 0) stats.server_cpu_usage.addValue(t.value().cpu_usage().value());
+                if (t.value().mem_usage().value() > 0) stats.server_mem_usage.addValue(t.value().mem_usage().value());
+                g_total_bytes.fetch_add(state->request.payload()->size(), std::memory_order_relaxed);
+            } else {
+                stats.fail.fetch_add(1, std::memory_order_relaxed);
+                if (FLAGS_verbose_rpc_error) LOG(ERROR) << "RPC failed: " << t.exception().what();
+            }
+
+            uint64_t last = g_client_last_update_time.load(std::memory_order_relaxed);
+            if (recv_time > last && recv_time - last > 100000) {
+                if (g_client_last_update_time.compare_exchange_weak(last, recv_time, std::memory_order_relaxed)) {
+                    auto snap = util::g_snapshot.load(std::memory_order_acquire);
+                    stats.client_cpu_usage.addValue(snap.cpu_percent);
+                    stats.client_mem_usage.addValue(snap.mem_percent);
+                }
+            }
+
+            g_total_cnt.fetch_add(1, std::memory_order_relaxed);
+            g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed);
+            state->total_inflight.fetch_sub(1, std::memory_order_relaxed);
+            state->total_processed.fetch_add(1, std::memory_order_relaxed);
+        });
+    return true;
+}
+
+// Paced open-loop sender: posts sends for `conns` to their EventBases so that
+// `qps` requests/s are issued evenly from state->start_time. The EventBases
+// keep blocking in epoll between events; no timer-tick bursts.
+static void pacer_loop(std::shared_ptr<BenchmarkState> state, std::vector<int> conns, double qps, folly::Executor* cpu_executor) {
+    prctl(PR_SET_TIMERSLACK, 1UL);
+    const int64_t start = static_cast<int64_t>(state->start_time);
+    const int64_t end = start + FLAGS_test_seconds * 1000000LL;
+    const util::PacedSchedule schedule(start, qps);
+    int64_t posted = 0;
+    size_t next = 0;
+    while (!g_stop.load(std::memory_order_acquire)) {
+        int64_t now = monotonic_us();
+        if (FLAGS_test_iterations == 0 && now >= end) { g_stop.store(true, std::memory_order_release); break; }
+        if (FLAGS_test_iterations > 0 && g_request_budget.load(std::memory_order_relaxed) <= 0) break;
+        int64_t due = schedule.dueCount(now);
+        if (due > posted) {
+            int64_t backlog = due - posted;
+            int64_t prev = g_max_burst.load(std::memory_order_relaxed);
+            while (backlog > prev && !g_max_burst.compare_exchange_weak(prev, backlog, std::memory_order_relaxed)) {}
+            for (; posted < due; ++posted) {
+                int idx = conns[next++ % conns.size()];
+                state->ctxs[idx]->evb->runInEventBaseThread([state, idx, cpu_executor]() { open_loop_send(state, idx, cpu_executor); });
+            }
+            continue;
+        }
+        int64_t wait = schedule.dueTime(posted) - monotonic_us();
+        if (wait > 60) std::this_thread::sleep_for(std::chrono::microseconds(wait - 50));
+        else std::this_thread::yield();
+    }
+    state->active_senders.fetch_sub(1, std::memory_order_relaxed);
 }
 
 // ============ Open-Loop Mode ============
@@ -407,98 +525,52 @@ std::shared_ptr<BenchmarkState> run_benchmark_open_loop(
     for (int i = 0; i < num_connections; ++i)
         state->conns_per_evb[state->ctxs[i]->evb_idx].push_back(i);
 
-    state->active_senders.store(num_evbs, std::memory_order_relaxed);
-
-    for (int e = 0; e < num_evbs; ++e) {
-        auto* evb = evb_list[e];
-        evb->runInEventBaseThread([state, evb, evb_idx = e, cpu_executor]() {
-            size_t next_conn_pos = 0;
-            auto sender_loop_ptr = std::make_shared<std::function<void()>>();
-            *sender_loop_ptr = [state, evb, evb_idx, cpu_executor, sender_loop_ptr, next_conn_pos]() mutable {
-                if (g_stop.load(std::memory_order_acquire)) { state->active_senders.fetch_sub(1); return; }
-
-                if (FLAGS_test_iterations == 0) {
-                    if (monotonic_us() - state->start_time > FLAGS_test_seconds * 1000000LL) {
+    std::vector<std::thread> pacers;
+    if (FLAGS_expected_qps > 0) {
+        // Paced mode: connections are split round-robin over up to 8 pacer
+        // threads; each pacer owns the matching share of the target rate.
+        int num_pacers = std::min(num_connections, 8);
+        state->active_senders.store(num_pacers, std::memory_order_relaxed);
+        for (int p = 0; p < num_pacers; ++p) {
+            std::vector<int> conns;
+            for (int i = p; i < num_connections; i += num_pacers) conns.push_back(i);
+            double qps = static_cast<double>(FLAGS_expected_qps) * conns.size() / num_connections;
+            pacers.emplace_back(pacer_loop, state, std::move(conns), qps, cpu_executor);
+        }
+    } else {
+        // Unlimited mode: each EventBase that owns connections keeps sending
+        // until the in-flight cap is reached.
+        int active_evbs = 0;
+        for (int e = 0; e < num_evbs; ++e)
+            if (!state->conns_per_evb[e].empty()) ++active_evbs;
+        state->active_senders.store(active_evbs, std::memory_order_relaxed);
+        for (int e = 0; e < num_evbs; ++e) {
+            if (state->conns_per_evb[e].empty()) continue;
+            auto* evb = evb_list[e];
+            evb->runInEventBaseThread([state, evb, evb_idx = e, cpu_executor]() {
+                auto sender_loop_ptr = std::make_shared<std::function<void()>>();
+                *sender_loop_ptr = [state, evb, evb_idx, cpu_executor, sender_loop_ptr, next_conn_pos = size_t(0)]() mutable {
+                    if (g_stop.load(std::memory_order_acquire)) { state->active_senders.fetch_sub(1); return; }
+                    if (FLAGS_test_iterations == 0 && monotonic_us() - state->start_time > FLAGS_test_seconds * 1000000LL) {
                         g_stop.store(true, std::memory_order_release);
                         state->active_senders.fetch_sub(1); return;
                     }
-                }
-
-                if (FLAGS_test_iterations > 0 && g_request_budget.load(std::memory_order_relaxed) <= 0) {
-                    state->active_senders.fetch_sub(1); return;
-                }
-
-                bool sent_any = false;
-                auto& my_conns = state->conns_per_evb[evb_idx];
-
-                for (int b = 0; b < 10; ++b) {
-                    int inflight = g_open_loop_inflight.load(std::memory_order_relaxed);
-                    int available = FLAGS_open_loop_inflight - inflight;
-                    if (available <= 0) break;
-
-                    int current = g_open_loop_inflight.fetch_add(1, std::memory_order_relaxed);
-                    if (current >= FLAGS_open_loop_inflight) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); break; }
-
-                    if (FLAGS_test_iterations > 0) {
-                        int64_t budget = g_request_budget.fetch_sub(1, std::memory_order_relaxed) - 1;
-                        if (budget < 0) { g_request_budget.fetch_add(1, std::memory_order_relaxed); g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); break; }
+                    if (FLAGS_test_iterations > 0 && g_request_budget.load(std::memory_order_relaxed) <= 0) {
+                        state->active_senders.fetch_sub(1); return;
                     }
-
-                    if (FLAGS_expected_qps > 0) {
-                        std::unique_lock<std::mutex> lock(g_token_mtx);
-                        if (g_token <= 0) { lock.unlock(); g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); if (FLAGS_test_iterations > 0) g_request_budget.fetch_add(1, std::memory_order_relaxed); break; }
-                        g_token--;
+                    auto& my_conns = state->conns_per_evb[evb_idx];
+                    bool sent_any = false;
+                    for (int b = 0; b < 10; ++b) {
+                        if (!open_loop_send(state, my_conns[next_conn_pos % my_conns.size()], cpu_executor)) break;
+                        ++next_conn_pos;
+                        sent_any = true;
                     }
-
-                    if (g_stop.load(std::memory_order_acquire)) { g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed); if (FLAGS_test_iterations > 0) g_request_budget.fetch_add(1, std::memory_order_relaxed); break; }
-
-                    state->total_inflight.fetch_add(1, std::memory_order_relaxed);
-                    int64_t send_time = monotonic_us();
-                    int idx = my_conns[next_conn_pos % my_conns.size()];
-                    next_conn_pos++;
-
-                    auto& ctx = *state->ctxs[idx];
-                    ctx.client->semifuture_test(state->request)
-                        .via(cpu_executor)
-                        .thenTry([state, idx, send_time](folly::Try<press_test::PerfTestResponse>&& t) {
-                            int64_t recv_time = monotonic_us();
-                            int64_t latency_us = recv_time - send_time;
-                            int stats_idx = get_stats_idx();
-                            ThreadStats& stats = *g_stats_per_cpu[stats_idx];
-
-                            if (t.hasValue()) {
-                                stats.latency.addValue(latency_us);
-                                stats.success.fetch_add(1, std::memory_order_relaxed);
-                                if (t.value().cpu_usage().value() > 0) stats.server_cpu_usage.addValue(t.value().cpu_usage().value());
-                                if (t.value().mem_usage().value() > 0) stats.server_mem_usage.addValue(t.value().mem_usage().value());
-                                g_total_bytes.fetch_add(state->request.payload()->size(), std::memory_order_relaxed);
-                            } else {
-                                stats.fail.fetch_add(1, std::memory_order_relaxed);
-                                if (FLAGS_verbose_rpc_error) LOG(ERROR) << "RPC failed: " << t.exception().what();
-                            }
-
-                            uint64_t last = g_client_last_update_time.load(std::memory_order_relaxed);
-                            if (recv_time > last && recv_time - last > 100000) {
-                                if (g_client_last_update_time.compare_exchange_weak(last, recv_time, std::memory_order_relaxed)) {
-                                    auto snap = util::g_snapshot.load(std::memory_order_acquire);
-                                    stats.client_cpu_usage.addValue(snap.cpu_percent);
-                                    stats.client_mem_usage.addValue(snap.mem_percent);
-                                }
-                            }
-
-                            g_total_cnt.fetch_add(1, std::memory_order_relaxed);
-                            g_open_loop_inflight.fetch_sub(1, std::memory_order_relaxed);
-                            state->total_inflight.fetch_sub(1, std::memory_order_relaxed);
-                            state->total_processed.fetch_add(1, std::memory_order_relaxed);
-                        });
-                    sent_any = true;
-                }
-
-                if (sent_any) evb->runInEventBaseThread([sender_loop_ptr]() { (*sender_loop_ptr)(); });
-                else evb->runAfterDelay([sender_loop_ptr]() { (*sender_loop_ptr)(); }, 1);
-            };
-            (*sender_loop_ptr)();
-        });
+                    if (sent_any) evb->runInEventBaseThread([sender_loop_ptr]() { (*sender_loop_ptr)(); });
+                    else evb->runAfterDelay([sender_loop_ptr]() { (*sender_loop_ptr)(); }, 1);
+                };
+                (*sender_loop_ptr)();
+            });
+        }
     }
 
     while (!g_stop.load(std::memory_order_acquire) ||
@@ -510,6 +582,7 @@ std::shared_ptr<BenchmarkState> run_benchmark_open_loop(
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    for (auto& t : pacers) t.join();
     return state;
 }
 
@@ -547,7 +620,8 @@ void test_once(int payload_size) {
   g_total_bytes.store(0, std::memory_order_relaxed);
   g_total_cnt.store(0, std::memory_order_relaxed);
 
-  { std::lock_guard<std::mutex> lock(g_token_mtx); g_token = (FLAGS_expected_qps > 0) ? FLAGS_expected_qps : 0; }
+  { std::lock_guard<std::mutex> lock(g_token_mtx); g_token = 0; }
+  g_max_burst.store(0, std::memory_order_relaxed);
 
   g_stats_per_cpu.clear();
   for (int i = 0; i < cpu_thread_num; ++i)
@@ -602,7 +676,7 @@ void test_once(int payload_size) {
   // double elapsed_sec = FLAGS_test_seconds;
   double elapsed_sec = elapsed_ms / 1000.0;
 
-  util::HistogramStats<int64_t> total_latency(100, 0, 5000000);
+  util::HistogramStats<int64_t> total_latency(kLatencyBucketUs, 0, kLatencyMaxUs);
   util::HistogramStats<double> total_server_cpu(1, 0.0, 30000.0);
   util::HistogramStats<double> total_client_cpu(1, 0.0, 30000.0);
   util::HistogramStats<double> total_server_mem(1, 0.0, 100.0);
@@ -681,6 +755,18 @@ void test_once(int payload_size) {
   }
 
   LOG(INFO) << "================================";
+
+  // One machine-readable line for the experiment scripts (key=value).
+  const double window_sec = FLAGS_test_iterations == 0 ? FLAGS_test_seconds : elapsed_sec;
+  std::cout << "RESULT qps=" << std::fixed << std::setprecision(2) << (total_success / window_sec)
+            << " p50=" << total_latency.getPercentile(0.50)
+            << " p90=" << total_latency.getPercentile(0.90)
+            << " p99=" << total_latency.getPercentile(0.99)
+            << " p999=" << total_latency.getPercentile(0.999)
+            << " max=" << total_latency.getMax()
+            << " fail=" << total_fail
+            << " max_burst=" << g_max_burst.load(std::memory_order_relaxed)
+            << " client_cpu_avg=" << total_client_cpu.getAvg() << std::endl;
 }
 
 // ============ main ============

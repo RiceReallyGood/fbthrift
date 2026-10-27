@@ -52,3 +52,7 @@ add_executable(proc_stat_test
     test/ProcStatTest.cpp
 )
 target_link_libraries(proc_stat_test PRIVATE atomic)
+
+add_executable(paced_schedule_test
+    test/PacedScheduleTest.cpp
+)
