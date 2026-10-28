@@ -9,6 +9,7 @@ import subprocess
 
 HERE = pathlib.Path(__file__).resolve().parent
 RUN_POINT = HERE / "run_point.sh"
+FOREIGN_LOAD = 3  # run_point.sh: another user's process was busy during the point
 
 COLUMNS = [
     "stage", "scenario", "config", "placement", "payload", "io", "cpu",
@@ -91,13 +92,19 @@ def run_point(out_dir, *, server_cpus, client_cpus, server_args, client_args,
         prefix = f"BIN={bin_dir} " if bin_dir else ""
         print(prefix + " ".join(shlex.quote(c) for c in cmd))
         return {}
-    for attempt in range(retries + 1):
+    attempt = 0
+    while True:
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode == 0:
             break
+        if p.returncode == FOREIGN_LOAD:
+            print(f"{out_dir}: other users were busy, redoing the point",
+                  flush=True)
+            continue
         if attempt == retries:
             raise RuntimeError(
                 f"run_point failed ({p.returncode}): {p.stderr.strip()[-800:]}")
+        attempt += 1
     row = {}
     for line in p.stdout.splitlines():
         if line.startswith("RESULT "):

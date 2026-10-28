@@ -11,9 +11,12 @@
 # server's loads with Arm SPE every PERIOD operations and summarizes where
 # their data came from (spe_sources.py). Both cover the same window.
 #
-# Writes DIR/{server.log,client.log,threads.txt[,perf.txt][,spe.json]} and
-# prints the client's RESULT line and the server's QUEUE_STATS and SPE lines
-# (if any) to stdout.
+# suzhou950 is shared, so a point waits until no other user's process is busy
+# and exits 3 (the caller redoes it) if one was busy while it ran.
+#
+# Writes DIR/{server.log,client.log,threads.txt,pidstat.txt[,perf.txt]
+# [,spe.json]} and prints the client's RESULT line and the server's
+# QUEUE_STATS and SPE lines (if any) to stdout.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -56,11 +59,23 @@ if listening; then
   exit 1
 fi
 
+# Other users' processes (not root, not us) using >= FOREIGN_PCT % of a CPU,
+# from pidstat -u -h -l output.
+FOREIGN_PCT=${FOREIGN_PCT:-10}
+me=$(id -u)
+foreign() {
+  awk -v me="$me" -v pct="$FOREIGN_PCT" \
+    '!/^#/ && NF >= 10 && $2 != me && $2 != 0 && $8 >= pct'
+}
+until [ -z "$(LC_ALL=C pidstat -u -h -l 3 1 | foreign)" ]; do sleep 20; done
+LC_ALL=C taskset -c "$client_cpus" pidstat -u -h -l 2 > "$out/pidstat.txt" 2>&1 &
+mon=$!
+
 # shellcheck disable=SC2086
 taskset -c "$server_cpus" "$BIN/press_server" --port="$PORT" $server_args \
   > "$out/server.log" 2>&1 &
 spid=$!
-trap 'kill -9 $spid 2>/dev/null || true' EXIT
+trap 'kill -9 $spid $mon 2>/dev/null || true' EXIT
 
 for _ in $(seq 300); do
   listening && break
@@ -109,7 +124,17 @@ for _ in $(seq 100); do
 done
 kill -9 "$spid" 2>/dev/null || true
 wait "$spid" 2>/dev/null || true
+kill "$mon" 2>/dev/null || true
+wait "$mon" 2>/dev/null || true
 trap - EXIT
+
+busy=$(foreign < "$out/pidstat.txt")
+if [ -n "$busy" ]; then
+  sudo -n rm -f "$out/spe.data" "$out/spe.data.old"
+  echo "other users' processes were busy during the point:" >&2
+  echo "$busy" | cut -c1-200 >&2
+  exit 3
+fi
 
 # Decode after the server has stopped, so that it does not disturb the run.
 if [ -n "$spe_period" ]; then
