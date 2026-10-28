@@ -1,29 +1,62 @@
 #!/usr/bin/env bash
-# Sync local sources to suzhou950:~/cluster_aware/src and record source versions.
-# Run locally (suzhou950 cannot reach GitHub).
+# Check out on suzhou950:~/cluster_aware/src exactly the commits checked out
+# locally and record them in ~/cluster_aware/SOURCE_VERSIONS. Run locally.
+#
+# suzhou950 fetches from GitHub through its HTTP proxy (git config --global
+# http.https://github.com/.proxy): folly / fbthrift from the forks, which must
+# already hold the local HEADs (this script never pushes), fizz / wangle from
+# upstream. Uncommitted local changes would not reach suzhou950, so the script
+# refuses to run with any.
 set -euo pipefail
 
 ROOT=${ROOT:-/home/fanzhenhao/fbthrift+folly}
 HOST=${HOST:-suzhou950}
 REMOTE=cluster_aware
 
-ssh "$HOST" "mkdir -p ~/$REMOTE/src"
+# <dir under src/> <local checkout under $ROOT> <GitHub repo> <local remote
+# that must already contain HEAD, or - for upstream tags>
+REPOS=(
+  "folly folly-ca RiceReallyGood/folly fork"
+  "fbthrift fbthrift-ca RiceReallyGood/fbthrift fork"
+  "fizz third_party_src/fizz facebookincubator/fizz -"
+  "wangle third_party_src/wangle facebook/wangle -"
+)
 
-RS=(rsync -a --delete --exclude .git)
-# Keep the repos' own build/ dirs (build/fbcode_builder/CMake is needed);
-# only skip the benchmark's local build output and generated code.
-"${RS[@]}" "$ROOT/folly-ca/" "$HOST:$REMOTE/src/folly/"
-"${RS[@]}" --exclude /fbthrift_folly_benchmark/build/ \
-  --exclude /fbthrift_folly_benchmark/gen-cpp2/ \
-  "$ROOT/fbthrift-ca/" "$HOST:$REMOTE/src/fbthrift/"
-"${RS[@]}" "$ROOT/third_party_src/fizz/" "$HOST:$REMOTE/src/fizz/"
-"${RS[@]}" "$ROOT/third_party_src/wangle/" "$HOST:$REMOTE/src/wangle/"
+plan=()
+for entry in "${REPOS[@]}"; do
+  read -r name dir repo remote <<<"$entry"
+  if [ -n "$(git -C "$ROOT/$dir" status --porcelain)" ]; then
+    echo "$dir has uncommitted changes; commit them first" >&2
+    exit 1
+  fi
+  sha=$(git -C "$ROOT/$dir" rev-parse HEAD)
+  if [ "$remote" != - ] && [ -z "$(git -C "$ROOT/$dir" for-each-ref \
+      --contains "$sha" "refs/remotes/$remote")" ]; then
+    echo "$dir HEAD $sha is not on $remote; push it first" \
+      "(git -C $ROOT/$dir push $remote $(git -C "$ROOT/$dir" branch --show-current))" >&2
+    exit 1
+  fi
+  plan+=("$name,https://github.com/$repo.git,$sha")
+done
 
-{
-  for repo in folly-ca fbthrift-ca third_party_src/fizz third_party_src/wangle; do
-    dirty=$(git -C "$ROOT/$repo" status --short | wc -l)
-    echo "$repo $(git -C "$ROOT/$repo" rev-parse HEAD) dirty_files=$dirty"
-  done
-} | ssh "$HOST" "cat > ~/$REMOTE/SOURCE_VERSIONS"
+# shellcheck disable=SC2029
+ssh "$HOST" REMOTE="$REMOTE" bash -s -- "${plan[@]}" <<'EOF'
+set -euo pipefail
+src=~/$REMOTE/src
+versions=()
+for entry in "$@"; do
+  IFS=, read -r name url sha <<<"$entry"
+  dir=$src/$name
+  if [ ! -e "$dir" ]; then
+    git init -q "$dir"
+    git -C "$dir" remote add origin "$url"
+  fi
+  [ -d "$dir/.git" ] || { echo "$dir is not a git checkout" >&2; exit 1; }
+  git -C "$dir" fetch -q --depth=50 origin "$sha"
+  git -C "$dir" checkout -q --detach "$sha"
+  versions+=("$name $sha dirty_files=$(git -C "$dir" status --porcelain | wc -l)")
+done
+printf '%s\n' "${versions[@]}" | tee ~/$REMOTE/SOURCE_VERSIONS
+EOF
 
 echo "synced to $HOST:~/$REMOTE/src"
