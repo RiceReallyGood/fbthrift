@@ -3,3 +3,5 @@ build/fbthrift_change/
 question/
 gen-cpp2/
 *.png
+# Experiment results stay local (the fork is public).
+cluster_exp/results/
