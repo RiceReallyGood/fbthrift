@@ -19,6 +19,10 @@ knee measured for that part, the same absolute QPS for every config. With
 --abs-loads the listed absolute QPS values are used instead (load_pct then
 holds the QPS), which shows where each config saturates.
 
+--spe-period N also samples the server's loads with Arm SPE (one per N
+operations) and records where their data came from (spe_sources.py); SPE
+adds overhead, so such runs are only used for the data sources.
+
 B1/B2/CA use folly::ClusterAwareExecutor (B1/B2 with one global queue) behind
 DirectThreadManager.
 """
@@ -41,6 +45,8 @@ CLIENT_CPUS = "192-383"
 LOADS = [30, 50, 70, 90]
 IMBALANCE_LOADS = [30, 50, 70]
 PERF_EVENTS = "context-switches,cpu-migrations,l3d_cache,l3d_cache_refill"
+# With SPE, also how many sampled operations collided with a sample in flight.
+SPE_PERF_EVENTS = PERF_EVENTS + ",sample_pop,sample_feed,sample_collision"
 ALL_CONFIGS = ["B0", "B1", "B2", "K1", "CA", "EB"]
 
 
@@ -73,6 +79,8 @@ def main():
     ap.add_argument("--knee-step", type=int, default=50000)
     ap.add_argument("--abs-loads", default=None,
                     help="comma-separated absolute QPS list (skips knee)")
+    ap.add_argument("--spe-period", type=int, default=None,
+                    help="also sample loads with Arm SPE every N operations")
     ap.add_argument("--out", default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -84,7 +92,8 @@ def main():
                        f"cluster_aware/results/stage2/{args.scenario}_{stamp}")
     out.mkdir(parents=True, exist_ok=True)
     csv_path = out / "stage2.csv"
-    (out / "perf_events.txt").write_text(PERF_EVENTS + "\n")
+    perf_events = SPE_PERF_EVENTS if args.spe_period else PERF_EVENTS
+    (out / "perf_events.txt").write_text(perf_events + "\n")
     cio, ccpu = sc["client"]
 
     # (part, configs, payload, (io, cpu), conns or None, loads)
@@ -153,8 +162,10 @@ def run_loads(args, out, csv_path, tag, part, configs, payload, io, cpu, conns,
                         server_args=server_args(config, io, cpu),
                         client_args=client(
                             target, method="testEb" if config == "EB" else None),
-                        perf=PERF_EVENTS, perf_delay=args.warmup + 1,
+                        perf=SPE_PERF_EVENTS if args.spe_period else PERF_EVENTS,
+                        perf_delay=args.warmup + 1,
                         perf_secs=max(1, args.seconds - 4),
+                        spe=args.spe_period,
                         dry_run=args.dry_run)
                     if config == "K1":
                         set_sched_cluster(1, args.dry_run)

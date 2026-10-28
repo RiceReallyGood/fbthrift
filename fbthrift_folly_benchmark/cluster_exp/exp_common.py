@@ -70,18 +70,22 @@ def client_args(*, io, cpu, conns, payload, seconds, warmup, qps=None,
 
 
 def run_point(out_dir, *, server_cpus, client_cpus, server_args, client_args,
-              perf=None, perf_delay=3, perf_secs=10, bin_dir=None,
+              perf=None, perf_delay=3, perf_secs=10, spe=None, bin_dir=None,
               dry_run=False, retries=1):
     """Run one point via run_point.sh and return the parsed result row.
 
+    spe is the Arm SPE sampling period (run_point.sh --spe), None for none.
     bin_dir selects another benchmark build (e.g. the vanilla-EventBase one).
     """
     cmd = [str(RUN_POINT), "--server-cpus", server_cpus,
            "--client-cpus", client_cpus, "--server-args", server_args,
            "--client-args", client_args, "--out", str(out_dir)]
     if perf:
-        cmd += ["--perf", perf, "--perf-delay", str(perf_delay),
-                "--perf-secs", str(perf_secs)]
+        cmd += ["--perf", perf]
+    if spe:
+        cmd += ["--spe", str(spe)]
+    if perf or spe:
+        cmd += ["--perf-delay", str(perf_delay), "--perf-secs", str(perf_secs)]
     env = dict(os.environ, BIN=str(bin_dir)) if bin_dir else None
     if dry_run:
         prefix = f"BIN={bin_dir} " if bin_dir else ""
