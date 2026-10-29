@@ -416,6 +416,14 @@ folly::EventBase* HandlerCallbackBase::getEventBase() {
 }
 
 concurrency::ThreadManager* HandlerCallbackBase::getThreadManager_deprecated() {
+  if (tm_) {
+    DCHECK_EQ(tm_, serverThreadManager());
+    return tm_;
+  }
+  return serverThreadManager();
+}
+
+concurrency::ThreadManager* HandlerCallbackBase::serverThreadManager() {
   if (reqCtx_) {
     if (auto connCtx = reqCtx_->getConnectionContext()) {
       if (auto workerCtx = connCtx->getWorkerContext()) {

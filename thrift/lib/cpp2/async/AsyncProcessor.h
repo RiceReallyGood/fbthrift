@@ -1190,6 +1190,7 @@ class HandlerCallbackBase {
                          INTERNAL)
                : nullptr),
         reqCtx_(reqCtx),
+        tm_(tm),
         protoSeqId_(0) {}
 
   HandlerCallbackBase(
@@ -1292,6 +1293,9 @@ class HandlerCallbackBase {
   void sendReply(SerializedResponse response);
   void sendReply(ResponseAndServerStreamFactory&& responseAndStream);
 
+  // The server's ThreadManager, looked up through reqCtx_ (null without one).
+  concurrency::ThreadManager* serverThreadManager();
+
   bool fulfillTilePromise(std::unique_ptr<Tile> ptr);
   void breakTilePromise();
 
@@ -1316,6 +1320,11 @@ class HandlerCallbackBase {
   folly::EventBase* eb_{nullptr};
   folly::Executor::KeepAlive<> executor_{};
   Cpp2RequestContext* reqCtx_{nullptr};
+  // The ThreadManager this callback was constructed with: the connection's
+  // cached copy of the server's. getThreadManager_deprecated() returns it
+  // instead of going through the server, which takes a global lock and
+  // copies a shared_ptr on every request.
+  concurrency::ThreadManager* tm_{nullptr};
 
   int32_t protoSeqId_;
 
