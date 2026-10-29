@@ -41,11 +41,12 @@ cd "$EXP"
 cp "$CA/SOURCE_VERSIONS" "$R/"
 
 run() {
-  local name=$1
+  local name=$1 rc
   shift
   echo "$(date '+%F %T') start $name"
   python3 "$@" --out "$R/$name" > "$R/$name.log" 2>&1
-  echo "$(date '+%F %T') end $name rc=$?"
+  rc=$? # before the $(date) below resets it
+  echo "$(date '+%F %T') end $name rc=$rc"
 }
 
 main() { # name scenario configs loads [extra args]

@@ -34,8 +34,7 @@ TOP_CROSS = ["peer_cluster", "remote_socket"]
 FUNCTION_GROUPS = [
     ("tm", re.compile(r"getThreadManager_deprecated")),
     ("queue", re.compile(r"ClusterAware2?BlockingQueue|UnboundedQueue|"
-                         r"StripedThrottledLifoSem|ThrottledLifoSem|"
-                         r"PriorityUnboundedQueueSet")),
+                         r"LifoSem|PriorityUnboundedQueueSet")),
     ("wake", re.compile(r"Baton|futex|\[kernel\.kallsyms\]")),
 ]
 # Design section 3: the S2 600k sweeps where CA was worse than B0.
@@ -171,12 +170,18 @@ def queue_point(row):
         empty_target=int(s["empty_target"]) / total if total else None,
         handoff=per_k(s["handoff"]),
         grab_hit=int(s["grab_take"]) / grab_tries if grab_tries else None,
-        grab_skip=per_k(s["grab_skip"]),
-        wake_local_p50=bucket_percentile(s["wake_local"], 0.5),
-        wake_local_p99=bucket_percentile(s["wake_local"], 0.99),
-        wake_remote_p50=bucket_percentile(s["wake_remote"], 0.5),
-        wake_remote_p99=bucket_percentile(s["wake_remote"], 0.99))
+        grab_skip=per_k(s["grab_skip"]))
     return out
+
+
+def pooled_wake(rows, key):
+    """Bucket counts of `key` summed over the repetitions."""
+    total = None
+    for r in rows:
+        b = parse_stats(r.get("queue_stats", "")).get(key)
+        if isinstance(b, list):
+            total = b if total is None else [x + y for x, y in zip(total, b)]
+    return total or []
 
 
 def us(ns):
@@ -205,6 +210,10 @@ def queue_table(parts):
             if not pts:
                 continue
             m = {k: med(p.get(k) for p in pts) for k in pts[0]}
+            for key in ("wake_local", "wake_remote"):
+                buckets = pooled_wake(v["rows"], key)
+                m[key + "_p50"] = bucket_percentile(buckets, 0.5)
+                m[key + "_p99"] = bucket_percentile(buckets, 0.99)
             if c == "CA":
                 print(f"| {scenario} | {load} | {c} | {fmt(m['steal'], 2)} |"
                       + " — |" * 11)
@@ -254,6 +263,7 @@ def spe_part(run, name):
                 others[re.sub(r"\s*\(.*\)$", "", sym)] += n
         for gname, _ in FUNCTION_GROUPS:
             row[gname] = groups[gname] / cross_n if cross_n else None
+            row[gname + "_per_req"] = groups[gname] * scale
         row["others"] = {s: n / cross_n for s, n in others.items()} if cross_n else {}
         row["p99"] = res.get("p99")
         points[(load, config)].append(row)
@@ -276,17 +286,23 @@ def spe_tables(run):
             continue
         result[name] = part
         print(f"### {name}: loads per request beyond the core\n")
-        print("Shares: of the samples from another cluster or socket cache "
-              "(top 30 functions per point, so lower bounds).\n")
+        print("Function columns use the top 30 functions per point, so they "
+              "are lower bounds.\n")
+        print("Loads per request; the queue, wake and tm columns count loads "
+              "from another cluster's or socket's cache in those functions "
+              "(per request, then their share of all such loads).\n")
         print("| load | config | p99 | peer cpu | own L3 | other cluster | "
-              "other socket | queue | wake/kernel | getThreadManager_deprecated |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+              "other socket | queue /req | queue | wake/kernel /req | "
+              "wake/kernel | tm /req | tm |")
+        print("|" + "---|" * 13)
         for (load, c) in sorted(part, key=lambda k: (k[0], rank(k[1]))):
             m = part[(load, c)]
             print(f"| {load} | {c} | {fmt(m['p99'])} | {fmt(m['peer_cpu'], 1)} | "
                   f"{fmt(m['l3'], 1)} | {fmt(m['peer_cluster'], 1)} | "
-                  f"{fmt(m['other_socket'], 1)} | {share(m['queue'])} | "
-                  f"{share(m['wake'])} | {share(m['tm'])} |")
+                  f"{fmt(m['other_socket'], 1)} | {fmt(m['queue_per_req'], 1)} | "
+                  f"{share(m['queue'])} | {fmt(m['wake_per_req'], 1)} | "
+                  f"{share(m['wake'])} | {fmt(m['tm_per_req'], 1)} | "
+                  f"{share(m['tm'])} |")
         print("\nOther functions with cross-cluster loads (share of them):\n")
         for (load, c) in sorted(part, key=lambda k: (k[0], rank(k[1]))):
             top = ", ".join(f"{s[:60]} {100 * v:.0f}%"
@@ -326,19 +342,29 @@ def verdict(failed, n):
     return "NO DATA" if n == 0 else ("FAIL" if failed else "PASS")
 
 
+def compare_to_ca(summaries, config):
+    """Points where CA sustains the load and `config` is above CA x
+    TOLERANCE or does not sustain it; and how many such points were
+    compared."""
+    worse = []
+    n = 0
+    for summary in summaries:
+        for (g, load, cfg), v in summary.items():
+            ca = summary.get((g, load, "CA"))
+            if cfg != config or not ca or not ca["ok"]:
+                continue
+            n += 1
+            if not v["ok"]:
+                worse.append(f"{g}@{load} OVL vs {fmt(ca['p99'])}")
+            elif v["p99"] > TOLERANCE * ca["p99"]:
+                worse.append(f"{g}@{load} {fmt(v['p99'])} vs {fmt(ca['p99'])}")
+    return worse, n
+
+
 def criteria(latency, sweeps_s2, imbalance, spes):
     for c in NEW:
-        worse = []
-        n = 0
-        for summary in latency:
-            for (g, load, cfg), v in summary.items():
-                ca = summary.get((g, load, "CA"))
-                if cfg != c or not ca or not v["ok"] or not ca["ok"]:
-                    continue
-                n += 1
-                if v["p99"] > TOLERANCE * ca["p99"]:
-                    worse.append(f"{g}@{load} {fmt(v['p99'])} vs {fmt(ca['p99'])}")
-        print(f"- {c} p99 <= CA x {TOLERANCE} on every point both sustain: "
+        worse, n = compare_to_ca(latency, c)
+        print(f"- {c} p99 <= CA x {TOLERANCE} on every point CA sustains: "
               f"{verdict(worse, n)} ({len(worse)} of {n} above"
               f"{': ' + '; '.join(worse[:6]) if worse else ''})")
 
@@ -364,25 +390,18 @@ def criteria(latency, sweeps_s2, imbalance, spes):
                     continue
                 n += 1
                 if not (v["peer_cluster"] <= ca["peer_cluster"] and
-                        (v["queue"] or 0) < (ca["queue"] or 0)):
+                        v["queue_per_req"] < ca["queue_per_req"]):
                     bad.append(f"{name}@{load} other cluster "
                                f"{fmt(v['peer_cluster'], 1)} vs "
-                               f"{fmt(ca['peer_cluster'], 1)}, queue "
-                               f"{share(v['queue'])} vs {share(ca['queue'])}")
-        print(f"- {c} SPE other-cluster loads <= CA and queue share < CA: "
+                               f"{fmt(ca['peer_cluster'], 1)}, queue /req "
+                               f"{fmt(v['queue_per_req'], 1)} vs "
+                               f"{fmt(ca['queue_per_req'], 1)}")
+        print(f"- {c} SPE other-cluster loads <= CA and queue loads per "
+              f"request < CA: "
               f"{verdict(bad, n)} ({len(bad)} of {n} not"
               f"{': ' + '; '.join(bad) if bad else ''})")
 
-        worse = []
-        n = 0
-        for summary in imbalance:
-            for (g, load, cfg), v in summary.items():
-                ca = summary.get((g, load, "CA"))
-                if cfg != c or not ca or not v["ok"] or not ca["ok"]:
-                    continue
-                n += 1
-                if v["p99"] > TOLERANCE * ca["p99"]:
-                    worse.append(f"{g}@{load} {fmt(v['p99'])} vs {fmt(ca['p99'])}")
+        worse, n = compare_to_ca(imbalance, c)
         print(f"- {c} imbalance p99 <= CA x {TOLERANCE}: "
               f"{verdict(worse, n)} ({len(worse)} of {n} above"
               f"{': ' + '; '.join(worse) if worse else ''})")
