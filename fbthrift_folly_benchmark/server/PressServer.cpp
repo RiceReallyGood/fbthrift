@@ -21,7 +21,7 @@ DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_int32(num_io_threads, 1, "Number of IO worker threads");
 DEFINE_int32(num_cpu_threads, 1, "Number of CPU worker threads");
 DEFINE_bool(use_io_uring, false, "Use IoUringBackend for IO threads");
-DEFINE_string(pool_mode, "tm", "Thread pools: tm | folly_cpu | cpu | cpu_pinned | cluster | manual");
+DEFINE_string(pool_mode, "tm", "Thread pools: tm | folly_cpu | cpu | cpu_pinned | cluster | cluster2 | cluster2_grab | striped | striped_pinned | manual");
 DEFINE_string(io_cpus, "", "manual mode: cpulist for IO threads");
 DEFINE_string(cpu_cpus, "", "manual mode: cpulist for CPU threads");
 
@@ -60,6 +60,9 @@ ServerHolder newServer(int32_t port, int32_t num_io_threads, int32_t num_cpu_thr
   server->setInterface(handler);
   holder.pools = press_server::makeServerPools(
       FLAGS_pool_mode, num_io_threads, num_cpu_threads, FLAGS_io_cpus, FLAGS_cpu_cpus);
+  if (holder.pools.queueStats) {
+    LOG(INFO) << "queue at start: " << holder.pools.queueStats();
+  }
   if (FLAGS_use_io_uring) {
     CHECK(FLAGS_pool_mode == "tm") << "--use_io_uring only works with --pool_mode=tm";
     folly::EventBaseBackendBase::FactoryFunc bf = []() {

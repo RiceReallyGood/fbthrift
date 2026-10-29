@@ -58,8 +58,15 @@ add_executable(paced_schedule_test
     test/PacedScheduleTest.cpp
 )
 
+add_executable(server_pools_test
+    test/ServerPoolsTest.cpp
+    server/ServerPools.cpp
+)
+target_link_libraries(server_pools_test PRIVATE thrift_generated ${COMMON_LIBS} atomic)
+
 # Run with `ctest` in the build directory (cluster_exp/build.sh bench_test).
 enable_testing()
 add_test(NAME latency_recorder_test COMMAND latency_recorder_test)
 add_test(NAME proc_stat_test COMMAND proc_stat_test)
 add_test(NAME paced_schedule_test COMMAND paced_schedule_test)
+add_test(NAME server_pools_test COMMAND server_pools_test)

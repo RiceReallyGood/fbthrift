@@ -17,22 +17,31 @@ struct ServerPools {
   // folly_cpu: passed to setThreadManagerFromExecutor (fbthrift wraps it in
   // VirtualExecutor + MeteredExecutors; kept as the original reference).
   std::shared_ptr<folly::CPUThreadPoolExecutor> cpu;
-  // cpu / cpu_pinned / cluster / manual: the executor behind a
-  // DirectThreadManager, passed to setThreadManager.
+  // Every other mode: the executor behind a DirectThreadManager, passed to
+  // setThreadManager.
   std::shared_ptr<folly::Executor> executor;
   std::shared_ptr<apache::thrift::concurrency::ThreadManager> threadManager;
-  std::function<std::string()> queueStats; // cluster-aware executor modes
+  // One line of key=value pairs: cluster-aware and striped modes.
+  std::function<std::string()> queueStats;
 };
 
-// mode: tm | folly_cpu | cpu | cpu_pinned | cluster | manual
-//   tm         - ThriftServer defaults (fbthrift ThreadManager), unpinned
-//   folly_cpu  - folly CPUThreadPoolExecutor via setThreadManagerFromExecutor
-//   cpu        - lean executor, one global queue, unpinned
-//   cpu_pinned - lean executor, one global queue, IO/CPU threads pinned
-//                round-robin to clusters
-//   cluster    - lean executor, per-cluster queues, threads pinned as above
-//   manual     - CPUThreadPoolExecutor (direct); IO threads pinned to
-//                ioCpus, CPU threads to cpuCpus (stage 1)
+// mode: tm | folly_cpu | cpu | cpu_pinned | cluster | cluster2 |
+//       cluster2_grab | striped | striped_pinned | manual
+//   tm             - ThriftServer defaults (fbthrift ThreadManager), unpinned
+//   folly_cpu      - folly CPUThreadPoolExecutor via
+//                    setThreadManagerFromExecutor
+//   cpu            - lean executor, one global queue, unpinned
+//   cpu_pinned     - lean executor, one global queue, IO/CPU threads pinned
+//                    round-robin to clusters
+//   cluster        - lean executor, per-cluster queues
+//                    (ClusterAwareBlockingQueue), threads pinned as above
+//   cluster2       - as cluster with ClusterAware2BlockingQueue
+//   cluster2_grab  - as cluster2 with its grab policy
+//   striped        - CPUThreadPoolExecutor over upstream's LLC-striped queue
+//                    (folly::striped_port), IO pool default, unpinned
+//   striped_pinned - as striped, IO/CPU threads pinned as cpu_pinned
+//   manual         - CPUThreadPoolExecutor (direct); IO threads pinned to
+//                    ioCpus, CPU threads to cpuCpus (stage 1)
 // Throws std::invalid_argument on an unknown mode or a bad cpulist.
 ServerPools makeServerPools(
     const std::string& mode,
