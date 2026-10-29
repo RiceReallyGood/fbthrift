@@ -57,3 +57,9 @@ target_link_libraries(proc_stat_test PRIVATE atomic)
 add_executable(paced_schedule_test
     test/PacedScheduleTest.cpp
 )
+
+# Run with `ctest` in the build directory (cluster_exp/build.sh bench_test).
+enable_testing()
+add_test(NAME latency_recorder_test COMMAND latency_recorder_test)
+add_test(NAME proc_stat_test COMMAND proc_stat_test)
+add_test(NAME paced_schedule_test COMMAND paced_schedule_test)
