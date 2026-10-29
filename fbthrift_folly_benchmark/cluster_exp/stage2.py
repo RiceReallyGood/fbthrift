@@ -5,15 +5,20 @@ S1 = 96T on one NUMA node (CPUs 0-95), S2 = 192T on two NUMA nodes of one
 socket (CPUs 0-191); the client runs on the other socket (CPUs 192-383).
 
 Configs (I/C = IO/CPU threads):
-  B0  ThriftServer defaults (ThreadManager), unpinned          - baseline
-  B1  lean executor, one global queue, unpinned
-  B2  IO/CPU threads pinned round-robin to clusters, global queue
-  K1  B0 with kernel.sched_cluster=1
-  CA  B2 + ClusterAwareBlockingQueue
-  EB  testEb (thread='eb'): handler on the IO thread, I+C IO threads
+  B0    ThriftServer defaults (ThreadManager), unpinned        - baseline
+  B1    lean executor, one global queue, unpinned
+  B2    IO/CPU threads pinned round-robin to clusters, global queue
+  K1    B0 with kernel.sched_cluster=1
+  CA    B2 + ClusterAwareBlockingQueue
+  CA2   B2 + ClusterAware2BlockingQueue
+  CA2-G CA2 with its grab policy
+  ST    upstream's LLC-striped queue under CPUThreadPoolExecutor, unpinned
+  ST-P  ST with IO/CPU threads pinned as B2
+  EB    testEb (thread='eb'): handler on the IO thread, I+C IO threads
 
-Parts: main (all configs, 1KB), payload (B0/CA at 64B and 16KB),
-ratio (B0/CA at IO:CPU 1:7 and 1:1), imbalance (B0/CA with 4 connections).
+Parts: main (all configs, 1KB), payload (SWEEP_CONFIGS at 64B and 16KB),
+ratio (SWEEP_CONFIGS at IO:CPU 1:7 and 1:1), imbalance (SWEEP_CONFIGS with
+4 connections); --configs picks a subset.
 Every part runs at 30/50/70/90% (imbalance: 30/50/70%) of B0's open-loop
 knee measured for that part, the same absolute QPS for every config. With
 --abs-loads the listed absolute QPS values are used instead (load_pct then
@@ -23,8 +28,10 @@ holds the QPS), which shows where each config saturates.
 operations) and records where their data came from (spe_sources.py); SPE
 adds overhead, so such runs are only used for the data sources.
 
-B1/B2/CA use folly::ClusterAwareExecutor (B1/B2 with one global queue) behind
-DirectThreadManager.
+B1/B2/CA use folly::ClusterAwareExecutor (B1/B2 with one global queue) and
+CA2/CA2-G folly::ClusterAware2Executor, ST/ST-P a CPUThreadPoolExecutor, all
+behind DirectThreadManager. --bin-dir runs another benchmark build (e.g. the
+TMFIX one).
 """
 
 import argparse
@@ -47,14 +54,17 @@ IMBALANCE_LOADS = [30, 50, 70]
 PERF_EVENTS = "context-switches,cpu-migrations,l3d_cache,l3d_cache_refill"
 # With SPE, also how many sampled operations collided with a sample in flight.
 SPE_PERF_EVENTS = PERF_EVENTS + ",sample_pop,sample_feed,sample_collision"
-ALL_CONFIGS = ["B0", "B1", "B2", "K1", "CA", "EB"]
+ALL_CONFIGS = ["B0", "B1", "B2", "K1", "CA", "CA2", "CA2-G", "ST", "ST-P",
+               "EB"]
+SWEEP_CONFIGS = ["B0", "CA", "CA2", "CA2-G", "ST", "ST-P"]
 
 
 def server_args(config, io, cpu):
     if config == "EB":
         return f"--pool_mode=tm --num_io_threads={io + cpu} --num_cpu_threads=1"
     mode = {"B0": "tm", "K1": "tm", "B1": "cpu", "B2": "cpu_pinned",
-            "CA": "cluster"}[config]
+            "CA": "cluster", "CA2": "cluster2", "CA2-G": "cluster2_grab",
+            "ST": "striped", "ST-P": "striped_pinned"}[config]
     return f"--pool_mode={mode} --num_io_threads={io} --num_cpu_threads={cpu}"
 
 
@@ -81,6 +91,8 @@ def main():
                     help="comma-separated absolute QPS list (skips knee)")
     ap.add_argument("--spe-period", type=int, default=None,
                     help="also sample loads with Arm SPE every N operations")
+    ap.add_argument("--bin-dir", default=None,
+                    help="benchmark build to run (default: run_point.sh's)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -102,13 +114,13 @@ def main():
         groups.append(("main", ALL_CONFIGS, 1024, sc["main"], None, LOADS))
     if "payload" in parts:
         for payload in (64, 16384):
-            groups.append(("payload", ["B0", "CA"], payload, sc["main"], None,
+            groups.append(("payload", SWEEP_CONFIGS, payload, sc["main"], None,
                            LOADS))
     if "ratio" in parts:
         for key in ("r17", "r11"):
-            groups.append(("ratio", ["B0", "CA"], 1024, sc[key], None, LOADS))
+            groups.append(("ratio", SWEEP_CONFIGS, 1024, sc[key], None, LOADS))
     if "imbalance" in parts:
-        groups.append(("imbalance", ["B0", "CA"], 1024, sc["main"], 4,
+        groups.append(("imbalance", SWEEP_CONFIGS, 1024, sc["main"], 4,
                        IMBALANCE_LOADS))
 
     for part, configs, payload, (io, cpu), conns, loads in groups:
@@ -124,7 +136,8 @@ def main():
                                   warmup=warmup, qps=qps, method=method)
 
         base = dict(server_cpus=sc["cpus"], client_cpus=CLIENT_CPUS,
-                    server_args=server_args("B0", io, cpu))
+                    server_args=server_args("B0", io, cpu),
+                    bin_dir=args.bin_dir)
         if args.abs_loads:
             abs_loads = [int(x) for x in args.abs_loads.split(",")]
             run_loads(args, out, csv_path, tag, part, configs, payload, io,
@@ -166,6 +179,7 @@ def run_loads(args, out, csv_path, tag, part, configs, payload, io, cpu, conns,
                         perf_delay=args.warmup + 1,
                         perf_secs=max(1, args.seconds - 4),
                         spe=args.spe_period,
+                        bin_dir=args.bin_dir,
                         dry_run=args.dry_run)
                     if config == "K1":
                         set_sched_cluster(1, args.dry_run)

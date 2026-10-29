@@ -16,6 +16,7 @@ COLUMNS = [
     "conns", "load_pct", "target_qps", "rep", "qps", "p50", "p90", "p99",
     "p999", "max", "fail", "max_burst", "client_cpu_avg", "ctx_switches",
     "migrations", "l3_access", "l3_refill", "local_takes", "stolen_takes",
+    "queue_stats",
 ]
 
 REQUEST_ARGS = "--transport=rocket --compression=none --echo_attachment=true"
@@ -50,6 +51,21 @@ def parse_perf(path):
         col = PERF_COLUMNS.get(event)
         if col:
             row[col] = fields[0]
+    return row
+
+
+def parse_point_stdout(stdout):
+    """run_point.sh output -> the client's RESULT fields, plus local_takes,
+    stolen_takes and the whole queue_stats line of the server's QUEUE_STATS."""
+    row = {}
+    for line in stdout.splitlines():
+        if line.startswith("RESULT "):
+            row.update(parse_kv(line))
+        elif line.startswith("QUEUE_STATS "):
+            kv = parse_kv(line)
+            row["local_takes"] = kv.get("local", "")
+            row["stolen_takes"] = kv.get("stolen", "")
+            row["queue_stats"] = line[len("QUEUE_STATS "):].strip()
     return row
 
 
@@ -105,14 +121,7 @@ def run_point(out_dir, *, server_cpus, client_cpus, server_args, client_args,
             raise RuntimeError(
                 f"run_point failed ({p.returncode}): {p.stderr.strip()[-800:]}")
         attempt += 1
-    row = {}
-    for line in p.stdout.splitlines():
-        if line.startswith("RESULT "):
-            row.update(parse_kv(line))
-        elif line.startswith("QUEUE_STATS "):
-            kv = parse_kv(line)
-            row["local_takes"] = kv.get("local", "")
-            row["stolen_takes"] = kv.get("stolen", "")
+    row = parse_point_stdout(p.stdout)
     if perf:
         row.update(parse_perf(pathlib.Path(out_dir) / "perf.txt"))
     return row

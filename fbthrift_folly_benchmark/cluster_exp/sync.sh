@@ -6,7 +6,9 @@
 # http.https://github.com/.proxy): folly / fbthrift from the forks, which must
 # already hold the local HEADs (this script never pushes), fizz / wangle from
 # upstream. Uncommitted local changes would not reach suzhou950, so the script
-# refuses to run with any.
+# refuses to run with any. fbthrift-tmfix (branch cluster-aware-tmfix) must be
+# fbthrift-ca's HEAD plus the one TMFIX commit, so that the two fbthrift
+# builds differ in nothing else.
 set -euo pipefail
 
 ROOT=${ROOT:-/home/fanzhenhao/fbthrift+folly}
@@ -18,9 +20,17 @@ REMOTE=cluster_aware
 REPOS=(
   "folly folly-ca RiceReallyGood/folly fork"
   "fbthrift fbthrift-ca RiceReallyGood/fbthrift fork"
+  "fbthrift-tmfix fbthrift-tmfix RiceReallyGood/fbthrift fork"
   "fizz third_party_src/fizz facebookincubator/fizz -"
   "wangle third_party_src/wangle facebook/wangle -"
 )
+
+if [ "$(git -C "$ROOT/fbthrift-tmfix" rev-parse HEAD^)" != \
+     "$(git -C "$ROOT/fbthrift-ca" rev-parse HEAD)" ]; then
+  echo "fbthrift-tmfix is not fbthrift-ca's HEAD plus one commit; rebase it" \
+    "(git -C $ROOT/fbthrift-tmfix rebase cluster-aware-bench)" >&2
+  exit 1
+fi
 
 plan=()
 for entry in "${REPOS[@]}"; do
