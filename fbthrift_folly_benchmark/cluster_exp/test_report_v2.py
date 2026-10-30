@@ -153,5 +153,20 @@ class CriteriaAndStatsTest(unittest.TestCase):
         self.assertIn("PASS", line)
 
 
+class TmfixTest(unittest.TestCase):
+    def test_pairs_within_the_tm_part_and_main_run_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = pathlib.Path(tmp)
+            (run / "S1").mkdir()
+            (run / "S1tm").mkdir()
+            for rep in (0, 1):
+                ec.append_csv(run / "S1" / "stage2.csv", point("CA2", rep, 110))
+                ec.append_csv(run / "S1tm" / "stage2.csv", point("CA2", rep, 112))
+                ec.append_csv(run / "S1tm" / "stage2.csv",
+                              point("CA2+TM", rep, 100))
+            text = run_report(run)
+        self.assertIn("| S1 | 200000 | CA2 | 112 | 100 | -10.7% | 110 |", text)
+
+
 if __name__ == "__main__":
     unittest.main()

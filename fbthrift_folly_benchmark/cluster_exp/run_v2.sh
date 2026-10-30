@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Scheduler v2 run on suzhou950 (all results of the v2 report): B0, CA, CA2,
-# CA2-G, ST, ST-P (and EB in the main scenarios) on the main build; B0, CA,
-# CA2, CA2-G again on the TMFIX build. Run from the synced tree, e.g.
-#   nohup ./run_v2.sh > ~/cluster_aware/results/run_v2_driver.log 2>&1 &
+# CA2-G, ST, ST-P (and EB in the main scenarios) on the main build; in the
+# *tm parts B0, CA, CA2, CA2-G on both builds, interleaved (X and X+TM). Run
+# from the synced tree, e.g.
+#   nohup setsid ./run_v2.sh > ~/cluster_aware/results/run_v2_driver.log 2>&1 &
+# ONLY="S1tm S2tm" runs just the named parts.
 set -uo pipefail
 
 CA=${CA:-$HOME/cluster_aware}
@@ -12,7 +14,7 @@ TMBIN=$CA/build/bench-tmfix
 
 MAIN=B0,CA,CA2,CA2-G,ST,ST-P,EB
 SWEEP=B0,CA,CA2,CA2-G,ST,ST-P
-TM=B0,CA,CA2,CA2-G
+TM=B0,B0+TM,CA,CA+TM,CA2,CA2+TM,CA2-G,CA2-G+TM
 S1_LOADS=50000,100000,200000,300000,450000,630000
 S2_LOADS=100000,200000,400000,600000,900000,1260000
 S2_SWEEP_LOADS=100000,200000,400000,600000,900000
@@ -43,6 +45,9 @@ cp "$CA/SOURCE_VERSIONS" "$R/"
 run() {
   local name=$1 rc
   shift
+  if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $name "* ]]; then
+    return
+  fi
   echo "$(date '+%F %T') start $name"
   python3 "$@" --out "$R/$name" > "$R/$name.log" 2>&1
   rc=$? # before the $(date) below resets it
@@ -72,10 +77,10 @@ main S1 S1 "$MAIN" "$S1_LOADS"
 main S2 S2 "$MAIN" "$S2_LOADS"
 spe S1spe S1 "$MAIN" 200000,450000
 spe S2spe S2 "$MAIN" 200000,600000
-main S1tm S1 "$TM" "$S1_LOADS" --bin-dir "$TMBIN"
-main S2tm S2 "$TM" "$S2_LOADS" --bin-dir "$TMBIN"
-spe S1spe_tm S1 "$TM" 200000,450000 --bin-dir "$TMBIN"
-spe S2spe_tm S2 "$TM" 200000,600000 --bin-dir "$TMBIN"
+main S1tm S1 "$TM" "$S1_LOADS" --tm-bin-dir "$TMBIN"
+main S2tm S2 "$TM" "$S2_LOADS" --tm-bin-dir "$TMBIN"
+spe S1spe_tm S1 "$TM" 200000,450000 --tm-bin-dir "$TMBIN"
+spe S2spe_tm S2 "$TM" 200000,600000 --tm-bin-dir "$TMBIN"
 sweep S1sweep S1 payload,ratio "$S1_LOADS"
 sweep S1imb S1 imbalance "$IMB_LOADS"
 sweep S2sweep S2 payload,ratio "$S2_SWEEP_LOADS"
