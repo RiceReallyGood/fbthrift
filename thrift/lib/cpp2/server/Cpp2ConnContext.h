@@ -519,6 +519,17 @@ class Cpp2RequestContext : public apache::thrift::server::TConnectionContext {
     executionScope_ = std::move(scope);
   }
 
+  // The ThreadManager the request was dispatched to (the connection's copy of
+  // the server's); set by GeneratedAsyncProcessorBase::processInThread, null
+  // on other paths.
+  concurrency::ThreadManager* getDispatchThreadManager() const {
+    return dispatchThreadManager_;
+  }
+
+  void setDispatchThreadManager(concurrency::ThreadManager* tm) {
+    dispatchThreadManager_ = tm;
+  }
+
   virtual std::vector<uint16_t>& getTransforms() {
     return header_->getWriteTransforms();
   }
@@ -617,6 +628,7 @@ class Cpp2RequestContext : public apache::thrift::server::TConnectionContext {
   TilePtr tile_;
   concurrency::ThreadManager::ExecutionScope executionScope_{
       concurrency::PRIORITY::NORMAL};
+  concurrency::ThreadManager* dispatchThreadManager_{nullptr};
 };
 
 } // namespace thrift

@@ -1139,6 +1139,10 @@ class ServerInterface : public virtual AsyncProcessorFactory,
  * finish the async call.  Only one of these must be called, otherwise your
  * client will likely get confused with multiple response messages.
  */
+// HandlerCallbackBase::getThreadManager_deprecated() does not look the
+// ThreadManager up on the server (benchmark TMFIX).
+#define THRIFT_TMFIX_DISPATCH_THREAD_MANAGER 1
+
 class HandlerCallbackBase {
  private:
   IOWorkerContext::ReplyQueue& getReplyQueue() {
@@ -1190,7 +1194,6 @@ class HandlerCallbackBase {
                          INTERNAL)
                : nullptr),
         reqCtx_(reqCtx),
-        tm_(tm),
         protoSeqId_(0) {}
 
   HandlerCallbackBase(
@@ -1320,11 +1323,6 @@ class HandlerCallbackBase {
   folly::EventBase* eb_{nullptr};
   folly::Executor::KeepAlive<> executor_{};
   Cpp2RequestContext* reqCtx_{nullptr};
-  // The ThreadManager this callback was constructed with: the connection's
-  // cached copy of the server's. getThreadManager_deprecated() returns it
-  // instead of going through the server, which takes a global lock and
-  // copies a shared_ptr on every request.
-  concurrency::ThreadManager* tm_{nullptr};
 
   int32_t protoSeqId_;
 
@@ -1632,6 +1630,9 @@ void GeneratedAsyncProcessorBase::processInThread(
     RpcKind kind,
     ExecuteFunc<ChildType> executeFunc,
     ChildType* childClass) {
+  // Lets HandlerCallbackBase::getThreadManager_deprecated() skip the server's
+  // locked getter.
+  ctx->setDispatchThreadManager(tm);
   Tile* tile = nullptr;
   if (auto interactionId = ctx->getInteractionId()) { // includes create
     try {

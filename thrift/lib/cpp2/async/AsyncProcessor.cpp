@@ -416,9 +416,15 @@ folly::EventBase* HandlerCallbackBase::getEventBase() {
 }
 
 concurrency::ThreadManager* HandlerCallbackBase::getThreadManager_deprecated() {
-  if (tm_) {
-    DCHECK_EQ(tm_, serverThreadManager());
-    return tm_;
+  // The server's getter takes its threadManagerMutex_ and copies a
+  // shared_ptr: two writes to one global cache line per request. The
+  // request already carries the same ThreadManager (fixed once the server
+  // runs) when it was dispatched by processInThread.
+  if (reqCtx_) {
+    if (auto tm = reqCtx_->getDispatchThreadManager()) {
+      DCHECK_EQ(tm, serverThreadManager());
+      return tm;
+    }
   }
   return serverThreadManager();
 }

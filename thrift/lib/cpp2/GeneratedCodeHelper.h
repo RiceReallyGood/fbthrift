@@ -915,6 +915,9 @@ inline void processViaExecuteRequest(
     return;
   }
 
+  // Lets HandlerCallbackBase::getThreadManager_deprecated() skip the server's
+  // locked getter.
+  ctx->setDispatchThreadManager(tm);
   folly::Executor::KeepAlive<> executor;
   if (untypedMethodMetadata.executorType ==
           AsyncProcessor::MethodMetadata::ExecutorType::ANY &&
