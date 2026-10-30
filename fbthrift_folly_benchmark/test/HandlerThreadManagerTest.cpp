@@ -101,8 +101,14 @@ static void checkScenario(
   }
   ScopedServerInterfaceThread runner(server);
   auto client = runner.newClient<press_test::PerfTestServiceAsyncClient>();
+  // The client's channel pool opens a connection per IO thread (4, see
+  // main) on first use, and each connection setup looks the ThreadManager up
+  // once: warm them all up before counting.
+  constexpr int kWarmup = 10;
   press_test::PerfTestResponse response;
-  client->sync_test(response, press_test::Request()); // sets up the connection
+  for (int i = 0; i < kWarmup; ++i) {
+    client->sync_test(response, press_test::Request());
+  }
   const long before = server->lookups.load();
   for (int i = 0; i < kRequests; ++i) {
     client->sync_test(response, press_test::Request());
@@ -111,7 +117,7 @@ static void checkScenario(
   ThreadManager* expected = server->getThreadManager_deprecated().get();
   auto seen = handler->seen();
   EXPECT_THAT(expected != nullptr, name << ": server has no ThreadManager");
-  EXPECT_THAT(seen.size() == kRequests + 1,
+  EXPECT_THAT(seen.size() == kWarmup + kRequests,
               name << ": " << seen.size() << " requests seen");
   int mismatches = 0;
   for (auto* tm : seen) {
