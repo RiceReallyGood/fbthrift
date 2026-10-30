@@ -26,8 +26,10 @@ REPOS=(
   "wangle third_party_src/wangle facebook/wangle -"
 )
 
-TMFIX_FILES="thrift/lib/cpp2/async/AsyncProcessor.cpp
-thrift/lib/cpp2/async/AsyncProcessor.h"
+TMFIX_FILES="thrift/lib/cpp2/GeneratedCodeHelper.h
+thrift/lib/cpp2/async/AsyncProcessor.cpp
+thrift/lib/cpp2/async/AsyncProcessor.h
+thrift/lib/cpp2/server/Cpp2ConnContext.h"
 bench_head=$(git -C "$ROOT/fbthrift-ca" rev-parse HEAD)
 if ! git -C "$ROOT/fbthrift-tmfix" merge-base --is-ancestor "$bench_head" HEAD ||
    [ "$(git -C "$ROOT/fbthrift-tmfix" diff --name-only "$bench_head" HEAD)" != \

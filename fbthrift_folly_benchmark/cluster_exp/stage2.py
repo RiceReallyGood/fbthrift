@@ -15,6 +15,8 @@ Configs (I/C = IO/CPU threads):
   ST    upstream's LLC-striped queue under CPUThreadPoolExecutor, unpinned
   ST-P  ST with IO/CPU threads pinned as B2
   EB    testEb (thread='eb'): handler on the IO thread, I+C IO threads
+  X+TM  config X on the TMFIX build (--tm-bin-dir), so that runs with and
+        without TMFIX interleave like any two configs
 
 Parts: main (all configs, 1KB), payload (SWEEP_CONFIGS at 64B and 16KB),
 ratio (SWEEP_CONFIGS at IO:CPU 1:7 and 1:1), imbalance (SWEEP_CONFIGS with
@@ -54,12 +56,23 @@ IMBALANCE_LOADS = [30, 50, 70]
 PERF_EVENTS = "context-switches,cpu-migrations,l3d_cache,l3d_cache_refill"
 # With SPE, also how many sampled operations collided with a sample in flight.
 SPE_PERF_EVENTS = PERF_EVENTS + ",sample_pop,sample_feed,sample_collision"
+TM_SUFFIX = "+TM"
 ALL_CONFIGS = ["B0", "B1", "B2", "K1", "CA", "CA2", "CA2-G", "ST", "ST-P",
-               "EB"]
+               "EB"] + [c + TM_SUFFIX for c in ("B0", "CA", "CA2", "CA2-G")]
 SWEEP_CONFIGS = ["B0", "CA", "CA2", "CA2-G", "ST", "ST-P"]
 
 
+def bin_dir_for(config, bin_dir, tm_bin_dir):
+    """Benchmark build for `config`: the TMFIX one for X+TM."""
+    if not config.endswith(TM_SUFFIX):
+        return bin_dir
+    if not tm_bin_dir:
+        raise ValueError(f"{config} needs --tm-bin-dir")
+    return tm_bin_dir
+
+
 def server_args(config, io, cpu):
+    config = config.removesuffix(TM_SUFFIX)
     if config == "EB":
         return f"--pool_mode=tm --num_io_threads={io + cpu} --num_cpu_threads=1"
     mode = {"B0": "tm", "K1": "tm", "B1": "cpu", "B2": "cpu_pinned",
@@ -93,6 +106,8 @@ def main():
                     help="also sample loads with Arm SPE every N operations")
     ap.add_argument("--bin-dir", default=None,
                     help="benchmark build to run (default: run_point.sh's)")
+    ap.add_argument("--tm-bin-dir", default=None,
+                    help="benchmark build with TMFIX, for the X+TM configs")
     ap.add_argument("--out", default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -179,7 +194,8 @@ def run_loads(args, out, csv_path, tag, part, configs, payload, io, cpu, conns,
                         perf_delay=args.warmup + 1,
                         perf_secs=max(1, args.seconds - 4),
                         spe=args.spe_period,
-                        bin_dir=args.bin_dir,
+                        bin_dir=bin_dir_for(config, args.bin_dir,
+                                            args.tm_bin_dir),
                         dry_run=args.dry_run)
                     if config == "K1":
                         set_sched_cluster(1, args.dry_run)

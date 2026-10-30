@@ -312,29 +312,41 @@ def spe_tables(run):
     return result
 
 
-def tmfix_tables(run, mains, spes):
-    print("| scenario | load | config | p99 without | p99 with TMFIX | change |")
-    print("|---|---|---|---|---|---|")
+TM = "+TM"
+
+
+def tmfix_tables(run, mains):
+    """X against X+TM within the *tm parts (same run, interleaved); "main
+    run" is X in the scheduling parts, a reference for run-to-run change."""
+    print("| scenario | load | config | p99 without | p99 with TMFIX | change | "
+          "p99 in the main run |")
+    print("|---|---|---|---|---|---|---|")
     for scenario in ("S1", "S2"):
-        base, fix = mains.get(scenario, {}), summarize(read_part(run, scenario + "tm"))
-        for (g, load, c), v in sorted(fix.items(),
+        part = summarize(read_part(run, scenario + "tm"))
+        main = mains.get(scenario, {})
+        for (g, load, c), v in sorted(part.items(),
                                       key=lambda kv: (kv[0][1], rank(kv[0][2]))):
-            b = base.get((g, load, c))
-            before = (fmt(b["p99"]) if b["ok"] else "OVL") if b else "—"
-            after = fmt(v["p99"]) if v["ok"] else "OVL"
-            print(f"| {scenario} | {load} | {c} | {before} | {after} | "
-                  f"{pct(v['p99'], b['p99'] if b else None)} |")
+            fixed = part.get((g, load, c + TM))
+            if c.endswith(TM) or not fixed:
+                continue
+            ref = main.get((g, load, c))
+            p99 = lambda x: (fmt(x["p99"]) if x["ok"] else "OVL") if x else "—"
+            print(f"| {scenario} | {load} | {c} | {p99(v)} | {p99(fixed)} | "
+                  f"{pct(fixed['p99'], v['p99'])} | {p99(ref)} |")
     print()
     print("| SPE | load | config | other cluster without | with TMFIX | "
-          "getThreadManager_deprecated without | with |")
-    print("|---|---|---|---|---|---|---|")
-    for name in ("S1spe", "S2spe"):
-        base, fix = spes.get(name, {}), spe_part(run, name + "_tm")
-        for (load, c), v in sorted(fix.items(), key=lambda kv: (kv[0][0], rank(kv[0][1]))):
-            b = base.get((load, c), {})
-            print(f"| {name} | {load} | {c} | {fmt(b.get('peer_cluster'), 1)} | "
-                  f"{fmt(v['peer_cluster'], 1)} | {share(b.get('tm'))} | "
-                  f"{share(v['tm'])} |")
+          "tm /req without | with | tm share without | with |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for name in ("S1spe_tm", "S2spe_tm"):
+        part = spe_part(run, name)
+        for (load, c), v in sorted(part.items(), key=lambda kv: (kv[0][0], rank(kv[0][1]))):
+            fixed = part.get((load, c + TM))
+            if c.endswith(TM) or not fixed:
+                continue
+            print(f"| {name} | {load} | {c} | {fmt(v['peer_cluster'], 1)} | "
+                  f"{fmt(fixed['peer_cluster'], 1)} | {fmt(v['tm_per_req'], 1)} | "
+                  f"{fmt(fixed['tm_per_req'], 1)} | {share(v['tm'])} | "
+                  f"{share(fixed['tm'])} |")
     print()
 
 
@@ -430,7 +442,7 @@ def main(argv):
     print("## 4. SPE\n")
     spes = spe_tables(run)
     print("## 5. TMFIX\n")
-    tmfix_tables(run, mains, spes)
+    tmfix_tables(run, mains)
     print("## 6. Success criteria (design section 3)\n")
     criteria(list(mains.values()) + list(sweeps.values()),
              sweeps.get("S2sweep", {}),

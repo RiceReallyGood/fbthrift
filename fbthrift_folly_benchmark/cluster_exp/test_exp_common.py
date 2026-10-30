@@ -50,5 +50,19 @@ class ServerArgsTest(unittest.TestCase):
             self.assertIn(config, stage2.ALL_CONFIGS)
 
 
+class TmfixPairTest(unittest.TestCase):
+    def test_tm_configs_run_the_base_config_on_the_tmfix_build(self):
+        self.assertEqual(stage2.server_args("CA2+TM", 24, 72),
+                         stage2.server_args("CA2", 24, 72))
+        self.assertEqual(stage2.bin_dir_for("CA2+TM", "/main", "/tm"), "/tm")
+        self.assertEqual(stage2.bin_dir_for("CA2", "/main", "/tm"), "/main")
+        for base in ("B0", "CA", "CA2", "CA2-G"):
+            self.assertIn(base + "+TM", stage2.ALL_CONFIGS)
+
+    def test_tm_configs_need_the_tmfix_build(self):
+        with self.assertRaises(ValueError):
+            stage2.bin_dir_for("B0+TM", None, None)
+
+
 if __name__ == "__main__":
     unittest.main()
