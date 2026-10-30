@@ -167,6 +167,34 @@ class TmfixTest(unittest.TestCase):
             text = run_report(run)
         self.assertIn("| S1 | 200000 | CA2 | 112 | 100 | -10.7% | 110 |", text)
 
+    def test_server_cpu_from_pidstat_mean_over_samples_and_reps(self):
+        header = ("# Time        UID       PID    %usr %system  %guest   %wait"
+                  "    %CPU   CPU  Command\n")
+
+        def pidstat(*samples):
+            lines = [header, "01:51:19  1006  4042668  4.13  3.67  0.00  0.00"
+                     "  7.80  192  pidstat -u -h -l 2\n"]
+            lines += [f"01:51:{21 + i}  1006  4042669  {u:.2f}  {s:.2f}  0.00"
+                      f"  0.00  {u + s:.2f}  4  /x/bench/press_server --port=1\n"
+                      for i, (u, s) in enumerate(samples)]
+            return "".join(lines)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = pathlib.Path(tmp)
+            (run / "S1tm").mkdir()
+            cpu = {("CA2", 0): pidstat((800, 14000), (1000, 14200)),
+                   ("CA2", 1): pidstat((900, 14100)),
+                   ("CA2+TM", 0): pidstat((820, 1720)),
+                   ("CA2+TM", 1): pidstat((860, 1700))}
+            for (config, rep), text in cpu.items():
+                ec.append_csv(run / "S1tm" / "stage2.csv",
+                              point(config, rep, 100, load=900000))
+                d = run / "S1tm" / TAG / config / f"load900000_rep{rep}"
+                d.mkdir(parents=True)
+                (d / "pidstat.txt").write_text(text)
+            text = run_report(run)
+        self.assertIn("| S1 | 900000 | CA2 | 9 / 141 | 8 / 17 |", text)
+
 
 if __name__ == "__main__":
     unittest.main()

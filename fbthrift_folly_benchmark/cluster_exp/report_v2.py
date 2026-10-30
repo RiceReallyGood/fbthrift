@@ -5,7 +5,8 @@ run_v2.sh.
 Usage: report_v2.py RUN_DIR
 RUN_DIR holds the parts S1, S2, S1spe, S2spe, S1tm, S2tm, S1spe_tm, S2spe_tm,
 S1sweep, S1imb, S2sweep, S2imb (each with stage2.csv; SPE parts also with
-per-point spe.json and client.log). Missing parts are skipped. Values are
+per-point spe.json and client.log; *tm parts may hold per-point
+pidstat.txt for the server CPU). Missing parts are skipped. Values are
 medians over repetitions; a point that missed 98% of its target QPS or had
 failures in any repetition is OVL.
 """
@@ -313,6 +314,26 @@ def spe_tables(run):
 
 
 TM = "+TM"
+PIDSTAT_TIME = re.compile(r"\d\d:\d\d:\d\d$")
+
+
+def server_cpu(run, name):
+    """{(load, config): (user, kernel)} in cores: press_server's pidstat
+    samples averaged within a point, then the median over repetitions."""
+    reps = collections.defaultdict(list)
+    for path in sorted((run / name).glob("*/*/load*_rep*/pidstat.txt")):
+        samples = []
+        for line in path.read_text().splitlines():
+            f = line.split()
+            # Time UID PID %usr %system %guest %wait %CPU CPU Command
+            if len(f) > 9 and PIDSTAT_TIME.match(f[0]) and "press_server" in f[9]:
+                samples.append((float(f[3]), float(f[4])))
+        if samples:
+            load = int(path.parent.name.split("_rep")[0][4:])
+            reps[(load, path.parent.parent.name)].append(
+                tuple(statistics.mean(s[i] for s in samples) / 100 for i in (0, 1)))
+    return {k: (med(u for u, _ in v), med(s for _, s in v))
+            for k, v in reps.items()}
 
 
 def tmfix_tables(run, mains):
@@ -333,6 +354,18 @@ def tmfix_tables(run, mains):
             p99 = lambda x: (fmt(x["p99"]) if x["ok"] else "OVL") if x else "—"
             print(f"| {scenario} | {load} | {c} | {p99(v)} | {p99(fixed)} | "
                   f"{pct(fixed['p99'], v['p99'])} | {p99(ref)} |")
+    print()
+    print("| scenario | load | config | server CPU cores (user / kernel) without "
+          "| with TMFIX |")
+    print("|---|---|---|---|---|")
+    for scenario in ("S1", "S2"):
+        cpu = server_cpu(run, scenario + "tm")
+        for (load, c), v in sorted(cpu.items(), key=lambda kv: (kv[0][0], rank(kv[0][1]))):
+            fixed = cpu.get((load, c + TM))
+            if c.endswith(TM) or not fixed:
+                continue
+            print(f"| {scenario} | {load} | {c} | {fmt(v[0])} / {fmt(v[1])} | "
+                  f"{fmt(fixed[0])} / {fmt(fixed[1])} |")
     print()
     print("| SPE | load | config | other cluster without | with TMFIX | "
           "tm /req without | with | tm share without | with |")
