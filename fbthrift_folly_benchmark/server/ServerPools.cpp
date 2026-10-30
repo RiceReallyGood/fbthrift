@@ -24,9 +24,9 @@ std::string formatStats(const folly::ClusterAware2Executor::Stats& s) {
   auto total = s.localTakes + s.stolenTakes;
   return folly::sformat(
       "local={} stolen={} steal_ratio={:.4f} assign_local={} assign_numa={} "
-      "assign_far={} orphan_add={} orphan_local_dec={} orphan_take={} "
-      "orphan_miss={} empty_target={} handoff={} grab_take={} grab_miss={} "
-      "grab_skip={} wake_local={} wake_remote={}",
+      "assign_far={} orphan_add={} orphan_take={} orphan_miss={} "
+      "empty_target={} handoff={} grab_take={} grab_miss={} grab_skip={} "
+      "wake_local={} wake_remote={}",
       s.localTakes,
       s.stolenTakes,
       total ? double(s.stolenTakes) / double(total) : 0.0,
@@ -34,7 +34,6 @@ std::string formatStats(const folly::ClusterAware2Executor::Stats& s) {
       s.assignSameNuma,
       s.assignOtherNuma,
       s.orphanAdds,
-      s.orphanLocalDecs,
       s.orphanTakes,
       s.orphanMisses,
       s.emptyTargetWakes,
